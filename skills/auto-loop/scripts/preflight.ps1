@@ -41,7 +41,10 @@ if ($cfg) {
     else {
         $branch = Get-ControlBranch $cfg
         $f = Invoke-Git $repo @('fetch', $remote)
-        if ($f.Code -ne 0) { Add-Result 'NG' '指令リポジトリ' "取得できない: $($f.Text)" '認証と通信を確かめる' }
+        if ($f.Code -ne 0) {
+            $hint = Get-GitFailureHint $repo $remote $f.Text
+            Add-Result 'NG' '指令リポジトリ' "取得できない: $(($f.Text -split "`n")[-1])" $(if ($hint) { $hint } else { '認証と通信を確かめる' })
+        }
         else {
             $p = Invoke-Git $repo @('push', '--dry-run', $remote, "HEAD:$branch")
             if ($p.Code -ne 0 -and $p.Text -notmatch 'non-fast-forward|fetch first') { Add-Result 'NG' '指令リポジトリ' "push できない: $($p.Text)" '権限（共同作業者）と認証を確かめる' }
@@ -123,7 +126,11 @@ function Test-LocalRepo($r, [string]$Path) {
     $norm = ($url.Text.Trim() -replace '\.git$', '').ToLowerInvariant()
     if ($r.repo -and -not $norm.EndsWith($r.repo.ToLowerInvariant())) { Add-Result 'NG' $area "本流のリモート $($r.remote) が $($r.repo) を指していない: $($url.Text.Trim())"; return }
     $f = Invoke-Git $Path @('fetch', $r.remote)
-    if ($f.Code -ne 0) { Add-Result 'NG' $area "git fetch $($r.remote) に失敗: $(($f.Text -split "`n")[0])" '認証を確かめる'; return }
+    if ($f.Code -ne 0) {
+        $hint = Get-GitFailureHint $Path $r.remote $f.Text
+        Add-Result 'NG' $area "git fetch $($r.remote) に失敗: $(($f.Text -split "`n")[-1])" $(if ($hint) { $hint -replace '<アカウント>', $(if ($r.account) { $r.account } else { '<アカウント>' }) } else { '認証を確かめる' })
+        return
+    }
     $ref = "$($r.remote)/$($r.base)"
     if ((Invoke-Git $Path @('rev-parse', '--verify', '--quiet', $ref)).Code -ne 0) { Add-Result 'NG' $area "基準ブランチ $ref が無い"; return }
     Add-Result 'OK' $area "$Path  本流=$ref"
@@ -135,13 +142,17 @@ function Test-LocalRepo($r, [string]$Path) {
     # 作業ツリー: 止まったサブエージェントの置き土産が無いか
     $wt = (Invoke-Git $Path @('worktree', 'list', '--porcelain')).Out
     $paths = @($wt | Where-Object { $_ -like 'worktree *' } | ForEach-Object { $_.Substring(9) })
+    $clean = 0; $missing = 0
     foreach ($w in ($paths | Select-Object -Skip 1)) {
-        if (-not (Test-Path -LiteralPath $w)) { Add-Result 'WARN' $area "作業ツリーの登録だけ残っている: $w" 'git worktree prune（利用者に確かめてから）'; continue }
+        if (-not (Test-Path -LiteralPath $w)) { $missing++; continue }
         $wd = @((Invoke-Git $w @('status', '--porcelain')).Out | Where-Object { $_ }).Count
         $wb = (Invoke-Git $w @('rev-parse', '--abbrev-ref', 'HEAD')).Text.Trim()
         if ($wd) { Add-Result 'WARN' $area "作業ツリー $w（$wb）に未コミットの変更が $wd 件。止まった委任の続きなら「仕上げ」として引き継ぐ" }
-        else { Add-Result 'INFO' $area "作業ツリー $w（$wb）" }
+        else { $clean++ }
     }
+    # 変更の無い作業ツリーは 1 行にまとめる（数が多いと、ほかの結果が埋もれる）
+    if ($clean) { Add-Result 'INFO' $area "変更の無い作業ツリーが $clean 本（一覧: git -C `"$Path`" worktree list）。不要なら片付けを利用者に提案する" }
+    if ($missing) { Add-Result 'WARN' $area "フォルダが無いのに登録だけ残っている作業ツリーが $missing 本" "git -C `"$Path`" worktree prune（利用者に確かめてから）" }
 }
 
 if ($cfg -and $Project) {

@@ -35,6 +35,8 @@ $hint = switch ($r.Reason) {
     'remote' { 'リモートに届かない。通信と認証を確かめる（preflight.ps1）' }
     default { '' }
 }
+$authHint = Get-GitFailureHint $cfg.controlRepoPath (Get-ControlRemote $cfg) $r.Detail
+if ($authHint) { $hint = $authHint }
 Write-Output "NG 同期できない（$($r.Reason)）: $($r.Detail)"
 if ($hint) { Write-Output "   → $hint" }
 exit 1

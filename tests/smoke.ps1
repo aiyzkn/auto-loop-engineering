@@ -146,6 +146,10 @@ try {
     Gx $target @('remote', 'set-url', 'origin', (Join-Path $root 'missing.git')) | Out-Null
     $p2 = Run 'a' 'preflight.ps1' @('-Project', 'demo')
     Check '本流のリモートが違えば NG（終了コード 1）' ($p2.Code -eq 1 -and $p2.Text -match 'NG\s+作業コピー main') $p2.Text
+    Gx $target @('remote', 'set-url', 'origin', $targetBare) | Out-Null
+    Gx $target @('worktree', 'add', '-q', '-b', 'loop/y', (Join-Path $root 'target-wt2')) | Out-Null
+    $p3 = Run 'a' 'preflight.ps1' @('-Project', 'demo')
+    Check '変更の無い作業ツリーは 1 行にまとめる' ($p3.Text -match '変更の無い作業ツリーが 1 本' -and $p3.Text -notmatch 'target-wt2') $p3.Text
     Check 'ログに残る' ((Get-Content (Join-Path $root 'home-a/logs/auto-loop.log') -Raw) -match '\[preflight\].*NG=1')
 }
 finally {

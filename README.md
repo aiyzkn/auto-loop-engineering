@@ -74,7 +74,7 @@ pwsh -NoProfile -File $HOME\.claude\skills\auto-loop\scripts\preflight.ps1
 
 ## 確かめたこと・確かめていないこと
 
-- スクリプトは `tests/smoke.ps1`（31 項目）で、起票・一覧・担当の主張・二重の主張の拒否・push の競り負け・引き継ぎ・主張の喪失の検出・解放と保管・同期の競合・着手前の確認を確かめています（Windows 11、PowerShell 7.1、手元の bare リポジトリ）
+- スクリプトは `tests/smoke.ps1`（32 項目）で、起票・一覧・担当の主張・二重の主張の拒否・push の競り負け・引き継ぎ・主張の喪失の検出・解放と保管・同期の競合・着手前の確認を確かめています（Windows 11、PowerShell 7.1、手元の bare リポジトリ）
 - 実際の作業で通して使った記録は [docs/field-checks.md](docs/field-checks.md) に足していきます。まだ確かめていないことも、そこにあります
 
 ## ライセンス

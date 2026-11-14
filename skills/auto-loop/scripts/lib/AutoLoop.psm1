@@ -104,6 +104,16 @@ function Invoke-Git {
     return [pscustomobject]@{ Code = $code; Out = $out; Text = ($out -join "`n") }
 }
 
+# git の失敗の文面から、直し方を 1 行で返す（分からなければ空）
+function Get-GitFailureHint {
+    param([string]$Repo, [string]$Remote, [string]$Text)
+    if ($Text -notmatch 'Cannot prompt because user interactivity has been disabled|terminal prompts disabled|could not read Username') { return '' }
+    $url = (Invoke-Git $Repo @('remote', 'get-url', $Remote)).Text.Trim()
+    $origin = if ($url -match '^(https?://[^/]+)') { $Matches[1] } else { 'https://<ホスト>' }
+    # Git Credential Manager に同じホストのアカウントが複数あると、選ぶ画面を出そうとして止まる
+    return "資格情報の入力が要る状態（同じホストのアカウントが複数保存されている、または未保存）。この clone で使うアカウントを固定する: git -C `"$Repo`" config credential.$origin.username <アカウント>（未保存なら、一度対話で git fetch してログインする）"
+}
+
 function Get-ControlRemote {
     param($Config)
     $r = Invoke-Git $Config.controlRepoPath @('remote')
