@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
   指令・状態管理用のリポジトリを、ひな形（assets/control-repo）から手元に作る。

@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
   auto-loop をこの PC に導入する（スキルの写しと、実行時のフォルダ・設定の用意）。何度実行しても安全。

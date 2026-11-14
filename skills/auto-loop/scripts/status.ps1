@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
   指令リポジトリの全案件の状態を短くまとめる（タスクファイルの全文は読まない）。

@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
   指令リポジトリの同期。変更があればコミットし、取り込んで（pull --rebase）送る（push）。

@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
   タスクファイルを、指令リポジトリの templates/task.md から作る（コミットはしない）。

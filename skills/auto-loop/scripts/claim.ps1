@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
   タスクの担当の主張（claim）・生存の印（heartbeat）・解放（release）・引き継ぎ（takeover）。

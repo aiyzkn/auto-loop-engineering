@@ -13,7 +13,9 @@
 ## ファイルの書き方
 
 - 応答・文書・コメントは日本語。確かめた事実と推測を分ける
-- 文字コードは UTF-8（BOM なし）、改行は LF。スクリプトは PowerShell 7（`#requires -Version 7.0`）。7.1 でも動く書き方にする（外部コマンドは `Invoke-Git` などの包みを通す）
+- 文字コードは UTF-8、改行は LF。`.ps1`・`.psm1` は **BOM 付き**、それ以外は BOM なし（配布先の yzkn/skills の決まり。PowerShell 5.1 で誤って実行しても、文字化けによる構文エラーではなく `#requires` の案内で止まる）
+- スクリプトは PowerShell 7（`#requires -Version 7.0`）。7.1 でも動く書き方にする（外部コマンドは `Invoke-Git` などの包みを通す）
+- PowerShell で git の出力をファイルに書くときは、`Set-Content -NoNewline` を使わない（行が改行なしでつながる）。`git diff > ファイル` のように git に直接書かせる
 - 大文字・小文字だけが違うファイル名を作らない。外部の道具と同じ名前の関数を作らない
 - 文字列の中の `$変数:` は `${変数}:` と書く（PowerShell がスコープの指定と読む）
 
@@ -28,6 +30,13 @@ pwsh -NoProfile -File tests/smoke.ps1
 ## 文書の対応
 
 手順を変えたら、次をそろえる: `skills/auto-loop/SKILL.md` と `references/`、ひな形の `AGENTS.md`・`README.md`・`policy.md`、`docs/design.md`（決めた理由）、`docs/operations.md`。実地で確かめたことは `docs/field-checks.md` に足す。
+
+## 配布先・複製との関係
+
+| このリポジトリの場所 | 正本 | 扱い |
+|---|---|---|
+| `skills/auto-loop/` | **ここ** | yzkn/skills の `packages/claude-skill-auto-loop/skills/auto-loop/` に配布する。ここを直したら、配布先にも PR を出す |
+| `skills/auto-resume-global/` | yzkn/skills の `packages/claude-skill-auto-resume-global/` | **ここでは直さない。** 正本を直してから複製し直す（`UPSTREAM.md`） |
 
 ## Git
 

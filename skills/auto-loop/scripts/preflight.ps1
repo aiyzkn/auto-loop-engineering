@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
   着手前の確認。認証・push 先の状態・本流のリモート・作業ツリーを、作業の最初に確かめる。

@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 # auto-loop の共通関数。指令リポジトリ（Markdown + git）を読み書きする
 # 方針: 認証の入力待ちで止まらない / 何もしなかった理由もログに残す / 破壊的な git 操作をしない
 Set-StrictMode -Version 3
