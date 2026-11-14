@@ -1,0 +1,33 @@
+# 実地確認の記録
+
+このキット自身について、「実際に起きて、確かめられたこと」と「まだ確かめていないこと」を分けて記録します。修正の効果は次の実地の機会まで確かめられないことが多いので、起きたらここに足します（タスクごとの記録は、タスクファイルの「実地確認の記録」）。
+
+## 確かめたこと
+
+| いつ | 何を | 何で確かめたか |
+|---|---|---|
+| 2026-11-15 | スクリプトの通し（起票・一覧・担当の主張・二重の主張の拒否・push の競り負け・印・引き継ぎ・主張の喪失の検出・解放と保管・同期の競合・着手前の確認） | `tests/smoke.ps1` が全項目成功（初版 31 項目、作業ツリーのまとめ表示を足して 32 項目）（Windows 11、PowerShell 7.1.4、手元の bare リポジトリ 2 clone） |
+| 2026-11-15 | PowerShell 7.1 では、外部コマンドの標準エラーを取り込むと例外になる | 通し試験が `git pull` の進み具合の出力で止まった。外部コマンドの呼び出しの間だけ、エラーの扱いを緩めて直した |
+| 2026-11-15 | `preflight.ps1` の GitHub の確認（実際の認証と、手元の clone に対して） | 一時の設定で実行。`OK 認証 github.com: gh: <有効なアカウント>`、`OK push 先 … に push 可`、本流リモートの向き先の照合、`WARN ローカルの main は upstream/main より 6 コミット遅れ`、指定のアカウントがログインしていないときの `NG` と直し方（`! gh auth login --hostname github.com --web`）、終了コード 1 を確かめた |
+| 2026-11-15 | この PC（A-MSI、`a-msi-claude`）への導入と、`auto-resume-global` との連携 | `install.ps1 -LinkAutoResume` で再開の指示 2 つ（`resumePrompt`・`rebootResumePrompt`）に案内が足され、ほかのキーは変わらないことを変更前の写しと比べて確かめた。2 回目は「案内は入っている。何もしない」 |
+| 2026-11-15 | Git Credential Manager に github.com のアカウントが 2 つあると、入力を無効にした git が止まる | 指令リポジトリの同期が `Cannot prompt because user interactivity has been disabled` で失敗。`GCM_TRACE` で「Multiple accounts available - prompting user to select one」を確認。clone ごとに `credential.https://github.com.username` を固定して直し、`preflight.ps1` と `sync.ps1` が直し方を示すようにした |
+| 2026-11-15 | GitLab の案件（vanilla）の `preflight.ps1` | `OK 認証 gitlab.com: glab: yzkn`、`OK push 先 … access_level=50`、`WARN ローカルの main は origin/main より 708 コミット遅れ`、過去のセッションの作業ツリー 39 本のうち未コミットの変更がある 1 本の検出 |
+
+## まだ確かめていないこと
+
+| 何を | どうすれば確かめられるか |
+|---|---|
+| GitHub 上の指令リポジトリを、2 台の PC・別々のアカウントで読み書きする | 2 台で `install.ps1` → 同じタスクを両方から `claim` し、片方が終了コード 2 になること |
+| `preflight.ps1` の GitLab の認証切れ・削除予定の検出（正常な場合は確かめた） | トークンが失効した状態で `NG 認証` と直し方が出ること。削除予定のプロジェクトで `NG push 先` が出ること |
+| `preflight.ps1` の、指定のアカウントがログイン済みだが有効でないときの案内（`gh auth switch`） | `gh` に 2 つのアカウントでログインした PC で、有効でないほうを `project.md` に書いて実行する |
+| 上限 → `auto-resume-global` の再開 → `/auto-loop resume` の一連 | `install.ps1 -LinkAutoResume` のあと、実際に上限で止まったとき。`~/.claude/auto-resume-global/logs/auto-resume.log` の再開の行と、タスクファイルのログの「再開:」の行の時刻を照らす |
+| 分岐後の「仕上げ」の委任（止まったサブエージェントの作業ツリーを引き継ぐ） | 委任の実行中に中断が起きたとき。タスクファイルの「委任」の表が「停止 → 仕上げ中 → 完了」と進むこと |
+| Claude Code 以外のエージェント（Copilot など）が `AGENTS.md` の手順で担当を主張する | 実際に 1 件通す |
+| 利用者が GitHub の画面でタスクファイルに回答を書き、エージェントが次の同期で読む | `waiting` のタスクで試す。同じ箇所を同時に書いたときの競合の直し方も確かめる |
+| macOS / Linux の `pwsh` での動作 | `tests/smoke.ps1` を流す |
+| スキルの説明文での自動適用（「ループの状態を見せて」などで起動するか） | 導入後の会話で確かめる |
+
+## 記録の足し方
+
+- 「いつ・何が起き・何で確かめたか（ログの行・コマンド・画面）」を 1 行で
+- 期待と違ったら、「確かめたこと」に事実を書き、直したなら何を直したかを添える。原因が断定できないときは「推測」と書く
