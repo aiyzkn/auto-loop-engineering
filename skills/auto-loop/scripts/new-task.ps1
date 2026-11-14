@@ -6,7 +6,7 @@
   ID は「日付-スラグ」（例 20261115-ui-unify）。連番を使わないので、複数のエージェントが同時に起票しても重ならない。
   作ったあと、本文（依頼の原文・目的と完了条件・計画）を埋めて sync.ps1 で送る。
 .EXAMPLE
-  pwsh -NoProfile -File new-task.ps1 -Project vanilla -Title '動的 UI の不統一を洗い出す' -Slug ui-audit -Stage propose -Source direct
+  pwsh -NoProfile -File new-task.ps1 -Project my-app -Title '動的 UI の不統一を洗い出す' -Slug ui-audit -Stage propose -Source direct
 #>
 param(
     [Parameter(Mandatory)][string]$Project,

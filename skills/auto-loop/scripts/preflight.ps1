@@ -7,7 +7,7 @@
   何も変更しない（git fetch だけ行う）。認証の入力待ちでは止まらず、NG として直し方のコマンドを示す。
 .EXAMPLE
   pwsh -NoProfile -File preflight.ps1                    # 道具・指令リポジトリだけ
-  pwsh -NoProfile -File preflight.ps1 -Project vanilla   # 案件のリポジトリも
+  pwsh -NoProfile -File preflight.ps1 -Project my-app   # 案件のリポジトリも
 #>
 param(
     [string]$Project = '',

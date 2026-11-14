@@ -7,7 +7,7 @@
   終了コード: 0 = 成功 / 1 = 失敗（理由を 1 行で出す）
 .EXAMPLE
   pwsh -NoProfile -File sync.ps1 -PullOnly
-  pwsh -NoProfile -File sync.ps1 -Message 'intake: vanilla に 2 件起票'
+  pwsh -NoProfile -File sync.ps1 -Message 'intake: my-app に 2 件起票'
 #>
 param(
     [string]$Message = '',

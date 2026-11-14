@@ -5,7 +5,7 @@
 .EXAMPLE
   pwsh -NoProfile -File status.ps1                 # 全案件（先に取り込む）
   pwsh -NoProfile -File status.ps1 -Mine -NoPull   # 自分が担当中のものだけ
-  pwsh -NoProfile -File status.ps1 -Project vanilla -All -Json
+  pwsh -NoProfile -File status.ps1 -Project my-app -All -Json
 #>
 param(
     [string]$Project = '',
