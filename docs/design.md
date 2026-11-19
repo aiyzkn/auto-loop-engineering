@@ -12,6 +12,30 @@
 | 対話のセッション（人が頼み、エージェントが進める）での運用 | 上限の検出・スリープからの復帰・セッションの再起動（`auto-resume-global` が受け持つ） |
 | | 無人で `claude -p` を回す常駐のループ（旧キットの orchestrator）。必要になったら、この状態の持ち方の上に載せる（5 章） |
 
+### 1.1 2 つのスキルの関係
+
+| 決めたこと | 理由 |
+|---|---|
+| `auto-loop` と `auto-resume-global` は、1 つにまとめず別々に保つ（2026-11-19。検討の結果を利用者が採った） | 受け持ちが違う（`auto-resume-global` は指令リポジトリを知らず、単体で使える）。`auto-resume-global` の導入は、タスク スケジューラ・電源の設定・`settings.json` のフックを変える「要指示」の操作で、`auto-loop` の導入に混ぜると承認の境界が広がる。macOS・Copilot など、`auto-loop` の手順だけを使う場合もある |
+| 正本は、どちらもこのキット。yzkn/skills は配布先（従）（2026-11-19。利用者の決定） | 2 つのつなぎ目を同じリポジトリの同じ PR で直せる。それまでは `auto-resume-global` だけ配布先が正本で、キットは複製だった（`skills/auto-resume-global/DISTRIBUTION.md`） |
+| つなぎ目は、`auto-loop` → `auto-resume-global` の一方向だけ。下の表のものだけを読む・書く | `auto-resume-global` を `auto-loop` なしで使えるようにする。下の表に無いもの（`state/handled.json` など、`auto-resume-global` の中の状態）は読まない |
+
+`auto-loop` が使う `auto-resume-global` のもの（インストール先は既定 `~/.claude/auto-resume-global/`。`auto-loop` の側は環境変数 `AUTO_LOOP_AUTO_RESUME_HOME` で替えられる）:
+
+| もの | 使うところ | 使い方 |
+|---|---|---|
+| `config.json` があること | `kick.ps1`・`install.ps1 -EnableKick`・`preflight.ps1` | 無ければ「未導入」として、自動起動を見送る |
+| `disabled` があること | `kick.ps1` | あれば「停止中」として、自動起動を見送る |
+| `config.json` の `claudePath` | `kick-session.ps1` | 起こすセッションの `claude` の場所。無ければ PATH の `claude` |
+| `config.json` の `shellPath`・`terminalPath` | `kick.ps1` | 新しいウィンドウを開くシェル・Windows Terminal。無ければ自分のシェル・PATH の `wt.exe` |
+| `config.json` の `resumePrompt`・`rebootResumePrompt` | `install.ps1 -LinkAutoResume`（書く。控えを `~/.claude/auto-loop/state/` に残す）・`preflight.ps1`（読む） | 再開の指示の末尾に「`/auto-loop resume`（無ければ `next`）」の案内を足す。`preflight.ps1` は、指示に `auto-loop` の文字があるかを見る |
+| タスク スケジューラのタスク `ClaudeAutoResumeGlobal-Wake` | `kick.ps1` | 次の実行時刻が先なら「上限の解除待ち」として、自動起動を見送る |
+| 再開・復帰の遅れ（解除時刻の 3 分後、ログオン・復帰の 1 分後） | `install.ps1 -EnableKick`（タスクの遅れ） | `kick.ps1` をその後（ログオン・復帰の 3 分後、週の解除時刻の 6 分後）に動かし、先に再開を済ませさせる |
+
+- このほか、セッションの記録（`~/.claude/projects/*/*.jsonl`）の上限の記録の読み方は、`auto-resume-global` と同じ考え方で `auto-loop` の `AutoLoop.psm1` にも別に書いている（コードは共有しない。記録の形は Claude Code のもので、どちらのスキルのものでもない）
+- `auto-resume-global` で上の表のもの（キーの名前・意味・インストール先・タスクの名前・遅れ）を変えるときは、`auto-loop` の側も同じ PR で直す。`auto-resume-global` の `SKILL.md` の「auto-loop との関係」にも同じことを書いている
+- `preflight.ps1` は、インストール先を `~/.claude/auto-resume-global/` に決め打ちしていて、`AUTO_LOOP_AUTO_RESUME_HOME` を見ない（2026-11-19 に気づいた。直すかは未定）
+
 ## 2. 指令リポジトリ
 
 ### なぜ別のリポジトリにするか

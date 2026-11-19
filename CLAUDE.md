@@ -36,7 +36,10 @@ pwsh -NoProfile -File tests/smoke.ps1
 | このリポジトリの場所 | 正本 | 扱い |
 |---|---|---|
 | `skills/auto-loop/` | **ここ** | yzkn/skills の `packages/claude-skill-auto-loop/skills/auto-loop/` に配布する。ここを直したら、配布先にも PR を出す |
-| `skills/auto-resume-global/` | yzkn/skills の `packages/claude-skill-auto-resume-global/` | **ここでは直さない。** 正本を直してから複製し直す（`UPSTREAM.md`） |
+| `skills/auto-resume-global/` | **ここ** | yzkn/skills の `packages/claude-skill-auto-resume-global/` に配布する（`README.md`・`MANUAL.md` はパッケージの直下へ）。ここを直したら、配布先にも PR を出す（`skills/auto-resume-global/DISTRIBUTION.md`） |
+
+- yzkn/skills は**配布先（従）**。配布先で直さない。直すときは、ここを直してから配布し直す（2026-11-19 の決定）
+- 2 つのスキルは別々のまま保つ（統合しない）。`auto-loop` が読む `auto-resume-global` のもの（つなぎ目）は `docs/design.md` の「1.1 2 つのスキルの関係」。つなぎ目を変えるときは、両方を同じ PR で直す
 
 ## Git
 

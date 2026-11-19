@@ -6,7 +6,7 @@
 - **`auto-loop` スキル**（Claude Code）: 起票・着手前の確認・担当の主張・状態の記録・再開・委任・完了の報告の手順と、そのスクリプト
 - **運用の手引き**: 承認の境界、役割分担、報告の型、既知の落とし穴
 
-上限の解除時刻に PC を起こしてセッションを再開する仕組みは、別のスキル `auto-resume-global`（Windows 専用）が受け持ちます。このキットは、その**再開のあとに何を読んで続けるか**を受け持ちます。`auto-resume-global` の複製を `skills/auto-resume-global/` に同梱しています（正本は [yzkn/skills](https://github.com/yzkn/skills)。複製元の版と複製し直す手順は [UPSTREAM.md](skills/auto-resume-global/UPSTREAM.md)）。`auto-loop` 自体も、yzkn/skills に `claude-skill-auto-loop` として配布しています。
+上限の解除時刻に PC を起こしてセッションを再開する仕組みは、別のスキル `auto-resume-global`（Windows 専用）が受け持ちます。このキットは、その**再開のあとに何を読んで続けるか**を受け持ちます。2 つのスキルの**正本は、どちらもこのキット**（`skills/auto-loop/`・`skills/auto-resume-global/`）です。[yzkn/skills](https://github.com/yzkn/skills) は配布先で、`claude-skill-auto-loop`・`claude-skill-auto-resume-global` として配っています（配布の手順は [DISTRIBUTION.md](skills/auto-resume-global/DISTRIBUTION.md)）。2 つは別々に導入でき、`auto-loop` が `auto-resume-global` の決まったもの（設定のキーなど）を読むだけです（[design.md の 1.1](docs/design.md#11-2-つのスキルの関係)）。
 
 ## 考え方
 
@@ -30,7 +30,7 @@ skills/auto-loop/                 スキル（そのまま ~/.claude/skills/ に
   references/                     setup / status / intake / start / next / preflight / checkpoint / resume / delegate / finish
   scripts/                        PowerShell 7 のスクリプト（下の表）
   assets/control-repo/            指令リポジトリのひな形
-skills/auto-resume-global/        上限の解除時刻に PC を起こして再開するスキル（yzkn/skills からの複製。ここでは直さない）
+skills/auto-resume-global/        上限の解除時刻に PC を起こして再開するスキル（正本。yzkn/skills に配布）
 docs/
   design.md                       設計と根拠、未解決の論点
   operations.md                   運用の手引き（人の動き・役割分担・落とし穴）
