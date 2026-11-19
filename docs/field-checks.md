@@ -12,6 +12,7 @@
 | 2026-11-15 | この PC（A-MSI、`a-msi-claude`）への導入と、`auto-resume-global` との連携 | `install.ps1 -LinkAutoResume` で再開の指示 2 つ（`resumePrompt`・`rebootResumePrompt`）に案内が足され、ほかのキーは変わらないことを変更前の写しと比べて確かめた。2 回目は「案内は入っている。何もしない」 |
 | 2026-11-15 | Git Credential Manager に github.com のアカウントが 2 つあると、入力を無効にした git が止まる | 指令リポジトリの同期が `Cannot prompt because user interactivity has been disabled` で失敗。`GCM_TRACE` で「Multiple accounts available - prompting user to select one」を確認。clone ごとに `credential.https://github.com.username` を固定して直し、`preflight.ps1` と `sync.ps1` が直し方を示すようにした |
 | 2026-11-15 | GitLab の案件（vanilla）の `preflight.ps1` | `OK 認証 gitlab.com: glab: yzkn`、`OK push 先 … access_level=50`、`WARN ローカルの main は origin/main より 708 コミット遅れ`、過去のセッションの作業ツリー 39 本のうち未コミットの変更がある 1 本の検出 |
+| 2026-11-19 | 受付の冒頭の案内（「この下に足してください」）に従って書いた依頼が、数えられていなかった | 利用者が 11/17 に GitHub の画面で `inbox.md` に 3 件書いたが、`status.ps1` は `inbox: 0`。件数は末尾の目印より下だけを数えていた。「手が空いた時に実行するタスク」の節を目印の上に足したとき（着手の順の追加）に、案内の位置と数える範囲がずれた。目印の位置に頼らず、`##` 見出しを数えるように直した（書き方の例の囲みと「手が空いた時」の節は除く）。`tests/smoke.ps1` に冒頭に書いた場合の項目を足した |
 
 ## まだ確かめていないこと
 
