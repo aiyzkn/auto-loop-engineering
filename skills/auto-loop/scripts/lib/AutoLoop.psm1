@@ -280,7 +280,7 @@ function Get-KickConfig {
         minIntervalHours     = 4        # 前に起こしてから、次に起こすまでの最短の時間
         idle                 = $true    # 通常のタスクが無いとき、手が空いたときの作業のために起こすか
         idleMinIntervalHours = 24       # 手が空いたときの作業のために起こす間隔
-        busyMinutes          = 15       # この分の内に記録が書かれたセッションがあれば、起こさない（0 なら見ない）
+        busyMinutes          = 15       # 作業中のセッション（入力待ちでないもの）の記録がこの分の内に書かれていれば、起こさない（0 なら見ない）
         idleCloseMinutes     = 60       # 起こしたセッションの記録がこの分のあいだ書かれなければ、終わらせる（0 なら終わらせない）
         permissionMode       = 'auto'   # 起こすセッションの権限モード
         remoteControl        = $true    # --remote-control つきで起こす
@@ -290,6 +290,95 @@ function Get-KickConfig {
         foreach ($p in $Config.kick.PSObject.Properties) { if ($k.Contains($p.Name) -and $null -ne $p.Value) { $k[$p.Name] = $p.Value } }
     }
     return [pscustomobject]$k
+}
+
+# Claude Code のセッションの記録（~/.claude/projects/<プロジェクト>/<ID>.jsonl）の末尾 MaxBytes バイトを行に分けて返す。
+# 末尾に巨大な行があっても速いよう、バイト単位で読む（auto-resume-global の Read-SessionTail と同じ考え方）。途中から読んだときは最初の行を捨てる
+function Read-SessionTailLines {
+    param([string]$Path, [long]$MaxBytes = 4MB)
+    $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $start = [math]::Max([long]0, $fs.Length - $MaxBytes)
+        [void]$fs.Seek($start, [IO.SeekOrigin]::Begin)
+        $buf = [byte[]]::new([int]($fs.Length - $start))
+        $n = 0
+        while ($n -lt $buf.Length) { $k = $fs.Read($buf, $n, $buf.Length - $n); if ($k -le 0) { break }; $n += $k }
+    }
+    finally { $fs.Dispose() }
+    [string[]]$lines = [Text.Encoding]::UTF8.GetString($buf, 0, $n).Split([char]"`n")
+    if ($start -gt 0 -and $lines.Length -gt 0) { $lines = @($lines | Select-Object -Skip 1) }
+    return , $lines
+}
+
+# セッションが「手を動かしているか」を、最後の会話の記録から判定する（kick.ps1 の 1 台 1 セッションの数え方。依頼 20261119-autoresume-fix-idle-dashboard）。
+#   empty         会話の記録が無い（起動したが何も指示されていない）
+#   limit         最後が利用上限の記録（解除待ち。kick.ps1 は復帰タスクで別に見る）
+#   waiting-input 最後が assistant の応答で、ツールの呼び出しが無い（利用者の入力待ち）
+#   working       最後が user の入力・ツールの結果、またはツールを呼び出し中で、BusyMinutes 分の内に記録（サブエージェントの記録を含む）が書かれた
+#   stale         working の形だが、BusyMinutes 分より長く書かれていない（権限の確認待ち・異常終了など。長いツールの実行もここに入りうる）
+# 利用者の入力ではない user の記録（サブエージェントの通知・isMeta など）と、サブエージェント側の記録（isSidechain）は飛ばす。
+# 記録の形は Claude Code の内部形式（2026-11 時点）。版が変わったら実物に合わせて直す
+function Get-SessionActivity {
+    param([string]$Path, [double]$BusyMinutes = 15)
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $item) { return [pscustomobject]@{ State = 'empty'; LastWrite = $null; Path = $Path } }
+    $lastWrite = $item.LastWriteTime
+    $sub = Join-Path $item.DirectoryName ([IO.Path]::GetFileNameWithoutExtension($item.Name))
+    if (Test-Path -LiteralPath $sub) {
+        $s = Get-ChildItem -LiteralPath $sub -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($s -and $s.LastWriteTime -gt $lastWrite) { $lastWrite = $s.LastWriteTime }
+    }
+    $state = 'empty'
+    $lines = Read-SessionTailLines $Path
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $l = $lines[$i].TrimEnd("`r")
+        if (-not $l.StartsWith('{')) { continue }
+        try { $r = $l | ConvertFrom-Json } catch { continue }
+        if ($r.type -notin @('user', 'assistant')) { continue }
+        if ($r.PSObject.Properties['isSidechain'] -and $r.isSidechain) { continue }
+        if ($r.type -eq 'user') {
+            if ($r.PSObject.Properties['isMeta'] -and $r.isMeta) { continue }
+            if ($r.PSObject.Properties['origin'] -and $r.origin -and $r.origin.PSObject.Properties['kind'] -and $r.origin.kind -ne 'human') { continue }
+            $c = if ($r.message) { $r.message.content } else { $null }
+            if ($c -is [string] -and $c -match '^\s*<(task-notification|system-reminder)>') { continue }
+            $state = 'working'; break
+        }
+        # assistant
+        if (($r.PSObject.Properties['apiError'] -and $r.apiError -in @('usage_limit_reached', 'model_requires_usage_credits')) -or
+            ($r.PSObject.Properties['error'] -and $r.error -eq 'rate_limit')) { $state = 'limit'; break }
+        $content = @(if ($r.message -and $r.message.PSObject.Properties['content']) { $r.message.content })
+        $tool = @($content | Where-Object { $_ -and $_.PSObject.Properties['type'] -and $_.type -eq 'tool_use' })
+        $state = if ($tool.Count -gt 0) { 'working' } else { 'waiting-input' }
+        break
+    }
+    if ($state -eq 'working' -and ((Get-Date) - $lastWrite).TotalMinutes -gt $BusyMinutes) { $state = 'stale' }
+    return [pscustomobject]@{ State = $state; LastWrite = $lastWrite; Path = $Path }
+}
+
+# この PC で「手を動かしている」セッションを数える。BusyMinutes 分の内に書かれた記録（本体かサブエージェント）だけを読む。
+# 戻り値の Working が 1 件以上なら、ほかのセッションが動いている。Idle は数えなかったもの（入力待ちなど）の内訳
+function Get-BusySessions {
+    param([string]$ProjectsDir, [double]$BusyMinutes = 15, [string[]]$ExcludeSessionIds = @())
+    $working = @(); $idle = @()
+    if (-not (Test-Path -LiteralPath $ProjectsDir)) { return [pscustomobject]@{ Working = $working; Idle = $idle } }
+    $cutoff = (Get-Date).AddMinutes(-$BusyMinutes)
+    $seen = @{}
+    foreach ($d in @(Get-ChildItem -LiteralPath $ProjectsDir -Directory -ErrorAction SilentlyContinue)) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $cutoff })) {
+            # サブエージェントの記録（<ID>/subagents/....jsonl）なら、本体の <ID>.jsonl を見る
+            $main = $f.FullName
+            $rel = $f.FullName.Substring($d.FullName.Length).TrimStart('\', '/')
+            $first = ($rel -split '[\\/]')[0]
+            if ($rel -ne $f.Name) { $main = Join-Path $d.FullName "$first.jsonl" }
+            $sid = [IO.Path]::GetFileNameWithoutExtension($main)
+            if ($seen.ContainsKey($main) -or $sid -in $ExcludeSessionIds) { continue }
+            $seen[$main] = $true
+            $a = Get-SessionActivity -Path $main -BusyMinutes $BusyMinutes
+            $row = [pscustomobject]@{ SessionId = $sid; Project = $d.Name; State = $a.State; LastWrite = $a.LastWrite }
+            if ($a.State -eq 'working') { $working += $row } else { $idle += $row }
+        }
+    }
+    return [pscustomobject]@{ Working = $working; Idle = $idle }
 }
 
 # 優先度の順（小さいほど先）。urgent は利用者が指定したときだけ使う。書いていない・知らない値は normal と同じ

@@ -182,10 +182,37 @@ try {
     $k2 = Run 'a' 'kick.ps1' @('-SkipSystemChecks')
     Check '有効にしていなければ起こさない' ($k2.Text -match 'SKIP kick.enabled が false' -and -not (Test-Path (Join-Path $root 'home-a/state/kick.json'))) $k2.Text
     New-Item -ItemType Directory -Force (Join-Path $projFake 'p1') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $projFake 'p1/s.jsonl'), "{}`n", $utf8)
+    # セッションの記録の形（Claude Code の内部形式の要点だけ）
+    $recUser = '{"parentUuid":null,"type":"user","message":{"role":"user","content":"作業して"}}'
+    $recTool = '{"parentUuid":"a","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}'
+    $recDone = '{"parentUuid":"b","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"終わりました"}]}}'
+    $recNote = '{"parentUuid":"c","type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification>done</task-notification>"}}'
+    $recLimit = '{"parentUuid":"d","type":"assistant","apiError":"usage_limit_reached","message":{"role":"assistant","content":[{"type":"text","text":"limit"}]}}'
+    $sFile = Join-Path $projFake 'p1/s.jsonl'
+    [IO.File]::WriteAllText($sFile, "$recUser`n$recTool`n", $utf8)
     $k3 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
-    Check 'ほかのセッションが動いていれば見送る' ($k3.Text -match 'SKIP ほかのセッションが動いている') $k3.Text
-    Remove-Item (Join-Path $projFake 'p1/s.jsonl') -Force
+    Check 'ほかのセッションが動いていれば見送る（ツールの呼び出し中）' ($k3.Text -match 'SKIP ほかのセッションが動いている') $k3.Text
+    [IO.File]::WriteAllText($sFile, "$recUser`n$recTool`n$recDone`n$recNote`n", $utf8)
+    $k3b = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '入力待ちのセッションは数えない（あとに付いた通知は飛ばす）' ($k3b.Text -match 'KICK work' -and $k3b.Text -match 'waiting-input=1') $k3b.Text
+    [IO.File]::WriteAllText($sFile, "$recUser`n$recLimit`n", $utf8)
+    $k3c = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '上限で止まったセッションは数えない' ($k3c.Text -match 'KICK work' -and $k3c.Text -match 'limit=1') $k3c.Text
+    [IO.File]::WriteAllText($sFile, '', $utf8)
+    $k3d = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '指示の無いセッションは数えない' ($k3d.Text -match 'KICK work' -and $k3d.Text -match 'empty=1') $k3d.Text
+    # 本体の記録は古いが、サブエージェントの記録が新しい → 動いている
+    [IO.File]::WriteAllText($sFile, "$recUser`n$recTool`n", $utf8)
+    (Get-Item $sFile).LastWriteTime = (Get-Date).AddMinutes(-40)
+    New-Item -ItemType Directory -Force (Join-Path $projFake 'p1/s/subagents') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $projFake 'p1/s/subagents/agent-1.jsonl'), "$recUser`n", $utf8)
+    $k3e = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check 'サブエージェントが書いていれば動いているとみなす' ($k3e.Text -match 'SKIP ほかのセッションが動いている') $k3e.Text
+    Remove-Item (Join-Path $projFake 'p1/s') -Recurse -Force
+    (Get-Item $sFile).LastWriteTime = (Get-Date).AddMinutes(-40)
+    Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
+    Check '長く書かれていない作業中の形は stale（数えない）' ((Get-SessionActivity -Path $sFile -BusyMinutes 15).State -eq 'stale')
+    Remove-Item $sFile -Force
     [IO.File]::WriteAllText((Join-Path $arFake 'disabled'), '', $utf8)
     $k4 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
     Check 'auto-resume-global が停止中なら見送る' ($k4.Text -match 'SKIP auto-resume-global が停止中') $k4.Text
