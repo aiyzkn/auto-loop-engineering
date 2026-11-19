@@ -282,6 +282,9 @@ function Get-KickConfig {
         idleMinIntervalHours = 24       # 手が空いたときの作業のために起こす間隔
         busyMinutes          = 15       # 作業中のセッション（入力待ちでないもの）の記録がこの分の内に書かれていれば、起こさない（0 なら見ない）
         idleCloseMinutes     = 60       # 起こしたセッションの記録がこの分のあいだ書かれなければ、終わらせる（0 なら終わらせない）
+        intervalMinutes      = 0        # この分ごとにも kick.ps1 を起動する（0 なら使わない。15・30 など）。起こすかどうかは同じ判断
+        weeklyAtReset        = $true    # 週の上限の解除時刻（の 6 分後）に、毎週 PC を起こして kick.ps1 を起動する（タスク AutoLoopKickWeekly）
+        weeklyResetAt        = ''       # 週の解除の曜日・時刻を手で決める（例 'Thu 08:00'）。空なら、セッションの記録の週の上限の resetsAt から取る
         permissionMode       = 'auto'   # 起こすセッションの権限モード
         remoteControl        = $true    # --remote-control つきで起こす
         prompt               = ''       # 最初に送る指示。空なら既定（/auto-loop next）
@@ -379,6 +382,180 @@ function Get-BusySessions {
         }
     }
     return [pscustomobject]@{ Working = $working; Idle = $idle }
+}
+
+# セッションの記録から、週の上限（rateLimitType が seven_day で始まる）の解除時刻を探す。Since より後に書かれた記録だけを読む。
+# 見つかった中で最も遅い解除時刻（ローカル時刻）を返す。無ければ $null。記録の形は Claude Code の内部形式（2026-11 時点）
+function Find-WeeklyResetFromTranscripts {
+    param([string]$ProjectsDir, [datetime]$Since)
+    if (-not (Test-Path -LiteralPath $ProjectsDir)) { return $null }
+    $files = @(Get-ChildItem -LiteralPath $ProjectsDir -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $Since })
+    if ($files.Count -eq 0) { return $null }
+    $latest = $null
+    foreach ($m in @($files | Select-String -Pattern '\{[^{}]*"rateLimitType"\s*:\s*"seven_day[^"]*"[^{}]*\}' -AllMatches -ErrorAction SilentlyContinue)) {
+        foreach ($x in $m.Matches) {
+            $r = [regex]::Match($x.Value, '"resetsAt"\s*:\s*(\d+)')
+            if (-not $r.Success) { continue }
+            $t = [DateTimeOffset]::FromUnixTimeSeconds([long]$r.Groups[1].Value).LocalDateTime
+            if (-not $latest -or $t -gt $latest) { $latest = $t }
+        }
+    }
+    return $latest
+}
+
+# 'Thu 08:00' のような書き方を、直近の過去のその曜日・時刻（DateTime）にする。読めなければ $null
+function ConvertFrom-WeeklyText {
+    param([string]$Text, [datetime]$Now = (Get-Date))
+    $days = @{ sun = 0; mon = 1; tue = 2; wed = 3; thu = 4; fri = 5; sat = 6; '日' = 0; '月' = 1; '火' = 2; '水' = 3; '木' = 4; '金' = 5; '土' = 6 }
+    $m = [regex]::Match($Text.Trim().ToLowerInvariant(), '^(sun|mon|tue|wed|thu|fri|sat|日|月|火|水|木|金|土)\S*\s+(\d{1,2}):(\d{2})$')
+    if (-not $m.Success) { return $null }
+    $dow = $days[$m.Groups[1].Value]
+    $t = $Now.Date.AddHours([int]$m.Groups[2].Value).AddMinutes([int]$m.Groups[3].Value)
+    $diff = ([int]$t.DayOfWeek - $dow + 7) % 7
+    $t = $t.AddDays(-$diff)
+    if ($t -gt $Now) { $t = $t.AddDays(-7) }
+    return $t
+}
+
+# 解除時刻（過去でも未来でもよい）から、Now 以降で最初の「解除時刻 + OffsetMinutes」を、7 日刻みで求める
+function Get-NextWeeklySlot {
+    param([datetime]$ResetAt, [int]$OffsetMinutes = 6, [datetime]$Now = (Get-Date))
+    $t = $ResetAt.AddMinutes($OffsetMinutes)
+    while ($t -le $Now) { $t = $t.AddDays(7) }
+    while ($t.AddDays(-7) -gt $Now) { $t = $t.AddDays(-7) }
+    return $t
+}
+
+# 自動起動のタスク（タスク スケジューラ）の XML。
+#   Kind 'main'  : AutoLoopKick。ログオン時・スリープ復帰時の 3 分後。IntervalMinutes > 0 なら、その分ごとにも
+#   Kind 'weekly': AutoLoopKickWeekly。WeeklyAt の曜日・時刻に毎週。PC を起こす（WakeToRun）
+function New-KickTaskXml {
+    param([ValidateSet('main', 'weekly')][string]$Kind, [string]$KickScript, [string]$Shell, [string]$User, [int]$IntervalMinutes = 0, [datetime]$WeeklyAt)
+    $esc = { param($s) [Security.SecurityElement]::Escape([string]$s) }
+    $trigger = if ($Kind -eq 'weekly') { 'weekly' } else { '' }
+    $argsText = "--headless `"$Shell`" -NoProfile -ExecutionPolicy Bypass -File `"$KickScript`"$(if ($trigger) { " -Trigger $trigger" })"
+    $u = & $esc $User
+    $triggers = ''
+    $desc = ''
+    $wake = 'false'
+    if ($Kind -eq 'main') {
+        $desc = "auto-loop: 起動時・スリープ解除時$(if ($IntervalMinutes -gt 0) { "と $IntervalMinutes 分ごと" })に、やることがあれば Claude Code のセッションを起こす ($KickScript)"
+        $triggers = @"
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>$u</UserId>
+      <Delay>PT3M</Delay>
+    </LogonTrigger>
+    <EventTrigger>
+      <Enabled>true</Enabled>
+      <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="System"&gt;&lt;Select Path="System"&gt;*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
+      <Delay>PT3M</Delay>
+    </EventTrigger>
+"@
+        if ($IntervalMinutes -gt 0) {
+            $start = (Get-Date).AddMinutes($IntervalMinutes).ToString('yyyy-MM-ddTHH:mm:00')
+            $triggers += @"
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT$($IntervalMinutes)M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>$start</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+"@
+        }
+    }
+    else {
+        $desc = "auto-loop: 週の上限の解除時刻（の 6 分後）に毎週 PC を起こし、やることがあれば Claude Code のセッションを起こす ($KickScript)"
+        $wake = 'true'
+        $triggers = @"
+    <CalendarTrigger>
+      <StartBoundary>$($WeeklyAt.ToString('yyyy-MM-ddTHH:mm:00'))</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <DaysOfWeek><$($WeeklyAt.DayOfWeek) /></DaysOfWeek>
+        <WeeksInterval>1</WeeksInterval>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+"@
+    }
+    return @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>$(& $esc $desc)</Description>
+  </RegistrationInfo>
+  <Triggers>
+$triggers  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$u</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <WakeToRun>$wake</WakeToRun>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>conhost.exe</Command>
+      <Arguments>$(& $esc $argsText)</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+}
+
+# 週の解除時刻を決める（kick.weeklyResetAt があればそれ、無ければ記録から）。結果は state/kick-weekly.json に残し、
+# 次からは前に調べた時刻より後に書かれた記録だけを読む（初回は 14 日分）。戻り値: ResetAt（$null なら不明）・Source
+function Resolve-WeeklyReset {
+    param($Kick, [string]$ProjectsDir, [switch]$NoSave)
+    $file = Join-Path (Get-LoopHome) 'state/kick-weekly.json'
+    $st = [ordered]@{ resetAt = ''; source = ''; scannedAt = ''; taskAt = '' }
+    if (Test-Path -LiteralPath $file) {
+        try { $o = [IO.File]::ReadAllText($file, $script:Utf8NoBom) | ConvertFrom-Json; foreach ($p in $o.PSObject.Properties) { if ($st.Contains($p.Name)) { $st[$p.Name] = [string]$p.Value } } } catch { }
+    }
+    $now = Get-Date
+    $reset = $null; $source = ''
+    if ([string]$Kick.weeklyResetAt) {
+        $reset = ConvertFrom-WeeklyText ([string]$Kick.weeklyResetAt) $now
+        $source = "設定 kick.weeklyResetAt = $($Kick.weeklyResetAt)"
+    }
+    else {
+        $since = $now.AddDays(-14)
+        if ($st.scannedAt) { try { $since = [datetimeoffset]::Parse($st.scannedAt).LocalDateTime.AddMinutes(-1) } catch { } }
+        $found = Find-WeeklyResetFromTranscripts -ProjectsDir $ProjectsDir -Since $since
+        $prev = $null
+        if ($st.resetAt) { try { $prev = [datetimeoffset]::Parse($st.resetAt).LocalDateTime } catch { } }
+        $reset = if ($found -and (-not $prev -or $found -gt $prev)) { $found } else { $prev }
+        $source = 'セッションの記録の週の上限（resetsAt）'
+        $st.scannedAt = Get-NowIso
+    }
+    if ($reset) { $st.resetAt = $reset.ToString('yyyy-MM-ddTHH:mm:sszzz'); $st.source = $source }
+    if (-not $NoSave) {
+        New-Item -ItemType Directory -Force (Split-Path -Parent $file) | Out-Null
+        Write-LoopText $file (([pscustomobject]$st) | ConvertTo-Json)
+    }
+    return [pscustomobject]@{ ResetAt = $reset; Source = $source; TaskAt = $st.taskAt; StateFile = $file }
+}
+
+# 週次のタスクの登録時刻を state/kick-weekly.json に書く
+function Set-WeeklyTaskAt {
+    param([string]$Iso)
+    $file = Join-Path (Get-LoopHome) 'state/kick-weekly.json'
+    $o = [ordered]@{ resetAt = ''; source = ''; scannedAt = ''; taskAt = '' }
+    if (Test-Path -LiteralPath $file) { try { $j = [IO.File]::ReadAllText($file, $script:Utf8NoBom) | ConvertFrom-Json; foreach ($p in $j.PSObject.Properties) { if ($o.Contains($p.Name)) { $o[$p.Name] = [string]$p.Value } } } catch { } }
+    $o.taskAt = $Iso
+    Write-LoopText $file (([pscustomobject]$o) | ConvertTo-Json)
 }
 
 # 優先度の順（小さいほど先）。urgent は利用者が指定したときだけ使う。書いていない・知らない値は normal と同じ

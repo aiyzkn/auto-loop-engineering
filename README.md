@@ -47,7 +47,7 @@ tests/smoke.ps1                   スクリプトの通し試験（一時フォ�
 | `new-task.ps1` | タスクファイルの作成 |
 | `claim.ps1` | 担当の主張・印・解放・引き継ぎ |
 | `sync.ps1` | 指令リポジトリの同期（コミット → 取り込み → 送信） |
-| `kick.ps1` / `kick-session.ps1` | 起動時（ログオン時）・スリープ解除時に、やることがあれば新しいウィンドウでセッションを起こす（`install.ps1 -EnableKick` で有効にしたときだけ。Windows 専用。判断だけを見るのは `kick.ps1 -DryRun`） |
+| `kick.ps1` / `kick-session.ps1` | 起動時（ログオン時）・スリープ解除時（と、設定すれば一定間隔・週の上限の解除時刻）に、手を動かしているセッションが無く、やることがあれば新しいウィンドウでセッションを起こす（`install.ps1 -EnableKick` で有効にしたときだけ。Windows 専用。判断だけを見るのは `kick.ps1 -DryRun`） |
 
 ## 始め方
 
