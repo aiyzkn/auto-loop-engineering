@@ -250,6 +250,41 @@ try {
     Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
     Check '見送りの理由がログに残る' ((Get-Content (Join-Path $root 'home-a/logs/auto-loop.log') -Raw) -match '\[kick\] 見送り')
 
+    Write-Output '10a. セッションの記録の上限（復帰タスクが無くても、解除時刻が先なら起こさない）'
+    $tsOf = { param([double]$Min) (Get-Date).AddMinutes($Min).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+    $unixOf = { param([double]$Min) [DateTimeOffset]::new((Get-Date).AddMinutes($Min)).ToUnixTimeSeconds() }
+    $recLim = { param([double]$ResetMin, [string]$Kind, [double]$AtMin) '{"parentUuid":"f","type":"assistant","timestamp":"' + (& $tsOf $AtMin) + '","error":"rate_limit","apiErrorParams":{"rate_limit_info":{"status":"rejected","resetsAt":' + (& $unixOf $ResetMin) + ',"rateLimitType":"' + $Kind + '"}},"message":{"role":"assistant","content":[{"type":"text","text":"limit"}]}}' }
+    $recOk = { param([double]$AtMin) '{"parentUuid":"g","type":"assistant","timestamp":"' + (& $tsOf $AtMin) + '","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}' }
+    $lFile = Join-Path $projFake 'p1/l.jsonl'; $oFile = Join-Path $projFake 'p2/o.jsonl'
+    New-Item -ItemType Directory -Force (Join-Path $projFake 'p2') | Out-Null
+    # 上限の前の応答は、解除の印にならない
+    [IO.File]::WriteAllText($lFile, "$recUser`n$(& $recOk -30)`n$recUser`n$(& $recLim 120 'five_hour' -10)`n", $utf8)
+    $kl1 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '復帰タスクが無くても、記録の上限の解除時刻が先なら見送る' ($kl1.Text -match 'SKIP 上限の解除待ち（セッションの記録: five_hour') $kl1.Text
+    $kl1f = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Force')
+    Check '-Force では記録の上限を見ない' ($kl1f.Text -match 'KICK work') $kl1f.Text
+    [IO.File]::AppendAllText($lFile, "$recUser`n", $utf8)
+    $kl2 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '上限のあとに利用者が入力しただけなら、まだ見送る' ($kl2.Text -match 'SKIP 上限の解除待ち') $kl2.Text
+    [IO.File]::WriteAllText($lFile, "$recUser`n$(& $recLim 120 'five_hour' -10)`n", $utf8)   # 末尾の入力を外す（手を動かしているセッションに数えないため）
+    [IO.File]::WriteAllText($oFile, "$recUser`n$(& $recOk -1)`n", $utf8)
+    $kl3 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '上限のあとに別のセッションで普通の応答があれば、解除済みとみなす' ($kl3.Text -match 'KICK work') $kl3.Text
+    Remove-Item $oFile -Force
+    [IO.File]::WriteAllText($lFile, "$recUser`n$(& $recLim -5 'five_hour' -300)`n", $utf8)
+    $kl4 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '解除時刻が過ぎた上限では見送らない' ($kl4.Text -match 'KICK work') $kl4.Text
+    [IO.File]::WriteAllText($lFile, "$recUser`n$(& $recLim 60 'five_hour' -20)`n", $utf8)
+    [IO.File]::WriteAllText($oFile, "$recUser`n$(& $recLim (3 * 1440) 'seven_day' -10)`n", $utf8)
+    $kl5 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    $expWeek = (Get-Date).AddMinutes(3 * 1440).ToString('MM/dd HH:mm')
+    Check '5 時間と週の上限が両方なら、遅いほう（週）の解除時刻で見送る' ($kl5.Text -match 'SKIP 上限の解除待ち（セッションの記録: seven_day、解除 ' + [regex]::Escape($expWeek)) $kl5.Text
+    Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
+    (Get-Item $lFile).LastWriteTime = (Get-Date).AddHours(-200); (Get-Item $oFile).LastWriteTime = (Get-Date).AddHours(-200)
+    Check '調べる範囲（LookbackHours）より前に書かれた記録は読まない' ($null -eq (Find-PendingLimit -ProjectsDir $projFake -LookbackHours 170))
+    Check '範囲を広げれば読む' ((Find-PendingLimit -ProjectsDir $projFake -LookbackHours 300).Kind -eq 'seven_day')
+    Remove-Item $lFile, $oFile -Force
+
     Write-Output '10b. 起動のきっかけ（週の解除時刻・一定間隔。タスクスケジューラには登録しない）'
     Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
     $kw0 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
