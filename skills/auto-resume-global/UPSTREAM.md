@@ -5,7 +5,7 @@
 | 項目 | 内容 |
 |---|---|
 | 正本 | https://github.com/yzkn/skills の `packages/claude-skill-auto-resume-global/` |
-| 複製した版 | コミット `327b1b9`（yzkn/skills の PR #8 のブランチ `auto-resume-global-weekly-sleep`。`upstream/main` の `7ec1661` の上。2026-11-19 に複製。**PR #8 はこの時点で未マージ**。マージで内容が変わったら、`upstream/main` から複製し直す） |
+| 複製した版 | コミット `327b1b9`（yzkn/skills の PR #8 のブランチ `auto-resume-global-weekly-sleep`。`upstream/main` の `7ec1661` の上。2026-11-19 に複製。PR #8 は同日マージ（af6fe7c）。マージ後の `upstream/main` のパッケージのツリーの値は 327b1b9 と同じ fc3f75c） |
 | 複製したもの | `skills/auto-resume-global/` の全体 → このフォルダ。パッケージの `README.md`・`MANUAL.md` → このフォルダ |
 | 複製していないもの | パッケージの `LICENSE`（キットの `LICENSE` と同じ Apache-2.0）、`.gitignore` |
 

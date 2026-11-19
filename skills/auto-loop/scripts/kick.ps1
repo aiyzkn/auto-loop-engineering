@@ -7,9 +7,10 @@
   起こすのは、次のすべてを満たすときだけ。見送ったときは、理由を logs/auto-loop.log に残す。
     1. config.json の kick.enabled が true
     2. auto-resume-global が導入済みで、停止中（disabled）でない
-    3. 前に起こしたセッションが動いていない（auto-resume-global が再開したセッションは、開いたまま残ることが多いので、5 で見る）
+    3. 前に起こしたセッションが、手を動かしていない（プロセスが無いか、入力待ちなど。auto-resume-global が再開したセッションは 5 で見る）
     4. 上限の解除待ちでない（復帰タスク ClaudeAutoResumeGlobal-Wake が先の時刻に登録されていない）
-    5. この PC でほかのセッションが動いていない（~/.claude/projects の記録が kick.busyMinutes 分の内に書かれていない）
+    5. この PC で、手を動かしているセッションが無い。手が止まっているもの（claude が起動していない / 起動したが指示が無い /
+       利用者の入力待ち / 上限の解除待ち / kick.busyMinutes 分より長く書かれていない）は数えない（Get-BusySessions）
     6. 前に起こしてから kick.minIntervalHours 時間が過ぎている
     7. やることがある: 自分が担当の doing / 回答の届いた waiting・blocked / 自分に合う ready / 受付の未整理（work）。
        どれも無ければ、手が空いたときの作業（idle。kick.idle が true で、前の idle から kick.idleMinIntervalHours 時間が過ぎているとき）
@@ -73,8 +74,16 @@ if (-not $SkipSystemChecks) {
     if (Test-Path -LiteralPath $runFile) {
         $run = $null
         try { $run = [IO.File]::ReadAllText($runFile, $utf8) | ConvertFrom-Json } catch { }
-        if ($run -and (Test-Pid $run.pid ([string]$run.startedAt))) { Skip "前に起こしたセッションが動いている（pid $($run.pid)、$($run.startedAt) から）" }
-        if (-not $DryRun) { Remove-Item -LiteralPath $runFile -Force -ErrorAction SilentlyContinue }   # 印だけが残っている（再起動など）
+        if ($run -and (Test-Pid $run.pid ([string]$run.startedAt))) {
+            # 動いていても、手が止まっている（入力待ちなど）なら数えない。そのウィンドウは kick-session.ps1 の見張りが終わらせる
+            $runState = 'working'
+            $runLog = @()
+            if ($run.sessionId -and (Test-Path -LiteralPath $projects)) { $runLog = @(Get-ChildItem -LiteralPath $projects -Recurse -File -Filter "$($run.sessionId).jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1) }
+            if ($runLog.Count -gt 0) { $runState = (Get-SessionActivity -Path $runLog[0].FullName -BusyMinutes ([double]$kick.busyMinutes)).State }
+            if ($runState -eq 'working') { Skip "前に起こしたセッションが動いている（pid $($run.pid)、$($run.startedAt) から）" }
+            Write-LoopLog 'kick' "前に起こしたセッションは手が止まっている（$runState、pid $($run.pid)）。数えない"
+        }
+        elseif (-not $DryRun) { Remove-Item -LiteralPath $runFile -Force -ErrorAction SilentlyContinue }   # 印だけが残っている（再起動など）
     }
 
     # 4. 上限の解除待ち（いま起こしても、すぐ上限で止まる）
@@ -87,15 +96,22 @@ if (-not $SkipSystemChecks) {
     }
 }
 
-# 5. ほかのセッションが動いている（共倒れを防ぐ。AGENTS.md 7.3）
-if ($kick.busyMinutes -gt 0 -and (Test-Path -LiteralPath $projects)) {
-    $cutoff = (Get-Date).AddMinutes(-[double]$kick.busyMinutes)
-    $busy = $null
-    foreach ($d in @(Get-ChildItem -LiteralPath $projects -Directory -ErrorAction SilentlyContinue)) {
-        $busy = Get-ChildItem -LiteralPath $d.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $cutoff } | Select-Object -First 1
-        if ($busy) { break }
+# 5. ほかのセッションが手を動かしている（共倒れを防ぐ。AGENTS.md 7.3）。手が止まっているものは数えない
+$idleNote = ''
+if ($kick.busyMinutes -gt 0) {
+    # claude のプロセスが 1 つも無ければ、記録を読むまでもなく動いていない（試験では飛ばす）
+    $anyClaude = $true
+    if (-not $SkipSystemChecks) { $anyClaude = [bool](Get-Process -Name 'claude' -ErrorAction SilentlyContinue | Select-Object -First 1) }
+    if ($anyClaude) {
+        $busy = Get-BusySessions -ProjectsDir $projects -BusyMinutes ([double]$kick.busyMinutes)
+        if ($busy.Working.Count -gt 0) {
+            $w = $busy.Working[0]
+            Skip "ほかのセッションが動いている（$($w.Project) の $($w.SessionId.Substring(0, [math]::Min(8, $w.SessionId.Length)))、$($kick.busyMinutes) 分の内に作業の記録がある。ほか $($busy.Working.Count - 1) 件）"
+        }
+        if ($busy.Idle.Count -gt 0) {
+            $idleNote = "。手が止まっているセッション $($busy.Idle.Count) 件は数えない（" + (($busy.Idle | Group-Object State | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ') + '）'
+        }
     }
-    if ($busy) { Skip "ほかのセッションが動いている（$($busy.Directory.Name) の記録が $($kick.busyMinutes) 分の内に書かれた）" }
 }
 
 # 6. 間隔
@@ -115,6 +131,7 @@ if (-not $Force -and $null -ne $since -and $since -lt [double]$kick.minIntervalH
 # 7. やることがあるか
 $pull = Update-ControlRepo $cfg
 $pullNote = if ($pull.Ok) { '' } else { "。指令リポジトリを取り込めなかった（$($pull.Reason)）ので手元の版で判断" }
+$pullNote += $idleNote
 $tasks = @(Get-LoopTasks $cfg)
 $repo = [string]$cfg.controlRepoPath
 $doing = @($tasks | Where-Object { $_.claimedBy -eq $me -and $_.status -eq 'doing' })
