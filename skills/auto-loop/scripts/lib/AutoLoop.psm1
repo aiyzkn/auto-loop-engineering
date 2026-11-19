@@ -135,55 +135,65 @@ function Test-RemoteBranch {
 # 取り込みだけ（未コミットの変更は autostash で保つ）
 function Update-ControlRepo {
     param($Config)
-    $repo = $Config.controlRepoPath
-    $remote = Get-ControlRemote $Config
-    if (-not $remote) { return [pscustomobject]@{ Ok = $true; Reason = 'local-only'; Detail = '' } }
-    $branch = Get-ControlBranch $Config
-    $rb = Test-RemoteBranch $Config $remote $branch
-    if (-not $rb.Ok) { return [pscustomobject]@{ Ok = $false; Reason = 'remote'; Detail = $rb.Detail } }
-    if (-not $rb.Exists) { return [pscustomobject]@{ Ok = $true; Reason = 'remote-empty'; Detail = '' } }
-    $r = Invoke-Git $repo @('pull', '--rebase', '--autostash', $remote, $branch)
-    if ($r.Code -ne 0) {
-        $conflict = $r.Text -match 'CONFLICT|could not apply'
-        Invoke-Git $repo @('rebase', '--abort') | Out-Null
-        return [pscustomobject]@{ Ok = $false; Reason = $(if ($conflict) { 'conflict' } else { 'pull' }); Detail = $r.Text }
+    # 同じ PC の別のセッションと、指令リポジトリの git の操作が重ならないようにする（20261120-no-parallel-sessions）
+    $lock = Enter-ControlLock $Config
+    try {
+        $repo = $Config.controlRepoPath
+        $remote = Get-ControlRemote $Config
+        if (-not $remote) { return [pscustomobject]@{ Ok = $true; Reason = 'local-only'; Detail = '' } }
+        $branch = Get-ControlBranch $Config
+        $rb = Test-RemoteBranch $Config $remote $branch
+        if (-not $rb.Ok) { return [pscustomobject]@{ Ok = $false; Reason = 'remote'; Detail = $rb.Detail } }
+        if (-not $rb.Exists) { return [pscustomobject]@{ Ok = $true; Reason = 'remote-empty'; Detail = '' } }
+        $r = Invoke-Git $repo @('pull', '--rebase', '--autostash', $remote, $branch)
+        if ($r.Code -ne 0) {
+            $conflict = $r.Text -match 'CONFLICT|could not apply'
+            Invoke-Git $repo @('rebase', '--abort') | Out-Null
+            return [pscustomobject]@{ Ok = $false; Reason = $(if ($conflict) { 'conflict' } else { 'pull' }); Detail = $r.Text }
+        }
+        return [pscustomobject]@{ Ok = $true; Reason = 'updated'; Detail = '' }
     }
-    return [pscustomobject]@{ Ok = $true; Reason = 'updated'; Detail = '' }
+    finally { Exit-ControlLock $lock }
 }
 
 # コミット（変更があれば）→ 取り込み → 送信。競合したら rebase を取り消して報告する（強制はしない）
 function Sync-ControlRepo {
     param($Config, [Parameter(Mandatory)][string]$Message)
-    $repo = $Config.controlRepoPath
-    $committed = $false
-    if ((Invoke-Git $repo @('status', '--porcelain')).Text.Trim()) {
-        Invoke-Git $repo @('add', '-A') | Out-Null
-        $r = Invoke-Git $repo @('commit', '-m', $Message)
-        if ($r.Code -ne 0) { return [pscustomobject]@{ Ok = $false; Reason = 'commit'; Detail = $r.Text; Committed = $false; Pushed = $false } }
-        $committed = $true
-    }
-    $remote = Get-ControlRemote $Config
-    if (-not $remote) { return [pscustomobject]@{ Ok = $true; Reason = 'local-only'; Detail = ''; Committed = $committed; Pushed = $false } }
-    $branch = Get-ControlBranch $Config
-    $last = ''
-    for ($i = 1; $i -le 3; $i++) {
-        $rb = Test-RemoteBranch $Config $remote $branch
-        if (-not $rb.Ok) { return [pscustomobject]@{ Ok = $false; Reason = 'remote'; Detail = $rb.Detail; Committed = $committed; Pushed = $false } }
-        if ($rb.Exists) {
-            $r = Invoke-Git $repo @('pull', '--rebase', $remote, $branch)
-            if ($r.Code -ne 0) {
-                $conflict = $r.Text -match 'CONFLICT|could not apply'
-                Invoke-Git $repo @('rebase', '--abort') | Out-Null
-                return [pscustomobject]@{ Ok = $false; Reason = $(if ($conflict) { 'conflict' } else { 'pull' }); Detail = $r.Text; Committed = $committed; Pushed = $false }
-            }
-            $ahead = (Invoke-Git $repo @('rev-list', '--count', "$remote/$branch..HEAD")).Text.Trim()
-            if ($ahead -eq '0') { return [pscustomobject]@{ Ok = $true; Reason = 'up-to-date'; Detail = ''; Committed = $committed; Pushed = $false } }
+    # 同じ PC の別のセッションと、指令リポジトリの git の操作が重ならないようにする（20261120-no-parallel-sessions）
+    $lock = Enter-ControlLock $Config
+    try {
+        $repo = $Config.controlRepoPath
+        $committed = $false
+        if ((Invoke-Git $repo @('status', '--porcelain')).Text.Trim()) {
+            Invoke-Git $repo @('add', '-A') | Out-Null
+            $r = Invoke-Git $repo @('commit', '-m', $Message)
+            if ($r.Code -ne 0) { return [pscustomobject]@{ Ok = $false; Reason = 'commit'; Detail = $r.Text; Committed = $false; Pushed = $false } }
+            $committed = $true
         }
-        $r = Invoke-Git $repo @('push', $remote, "HEAD:$branch")
-        if ($r.Code -eq 0) { return [pscustomobject]@{ Ok = $true; Reason = 'pushed'; Detail = ''; Committed = $committed; Pushed = $true } }
-        $last = $r.Text
+        $remote = Get-ControlRemote $Config
+        if (-not $remote) { return [pscustomobject]@{ Ok = $true; Reason = 'local-only'; Detail = ''; Committed = $committed; Pushed = $false } }
+        $branch = Get-ControlBranch $Config
+        $last = ''
+        for ($i = 1; $i -le 3; $i++) {
+            $rb = Test-RemoteBranch $Config $remote $branch
+            if (-not $rb.Ok) { return [pscustomobject]@{ Ok = $false; Reason = 'remote'; Detail = $rb.Detail; Committed = $committed; Pushed = $false } }
+            if ($rb.Exists) {
+                $r = Invoke-Git $repo @('pull', '--rebase', $remote, $branch)
+                if ($r.Code -ne 0) {
+                    $conflict = $r.Text -match 'CONFLICT|could not apply'
+                    Invoke-Git $repo @('rebase', '--abort') | Out-Null
+                    return [pscustomobject]@{ Ok = $false; Reason = $(if ($conflict) { 'conflict' } else { 'pull' }); Detail = $r.Text; Committed = $committed; Pushed = $false }
+                }
+                $ahead = (Invoke-Git $repo @('rev-list', '--count', "$remote/$branch..HEAD")).Text.Trim()
+                if ($ahead -eq '0') { return [pscustomobject]@{ Ok = $true; Reason = 'up-to-date'; Detail = ''; Committed = $committed; Pushed = $false } }
+            }
+            $r = Invoke-Git $repo @('push', $remote, "HEAD:$branch")
+            if ($r.Code -eq 0) { return [pscustomobject]@{ Ok = $true; Reason = 'pushed'; Detail = ''; Committed = $committed; Pushed = $true } }
+            $last = $r.Text
+        }
+        return [pscustomobject]@{ Ok = $false; Reason = 'push'; Detail = $last; Committed = $committed; Pushed = $false }
     }
-    return [pscustomobject]@{ Ok = $false; Reason = 'push'; Detail = $last; Committed = $committed; Pushed = $false }
+    finally { Exit-ControlLock $lock }
 }
 
 function Find-TaskFile {
@@ -789,6 +799,87 @@ function Get-IdleDefinitions {
         }
     }
     return $defs
+}
+
+# --- 同じ PC の複数のセッション（20261120-no-parallel-sessions） ---
+# 担当はエージェント ID 単位なので、同じ PC・同じ ID の 2 つのセッション（上限からの再開と自動起動など）は、どちらも「自分の担当」とみなしてしまう。
+# 進行中の印（state/active/<タスク ID>.json）に担当したセッションを書き、別のセッションが生きて手を動かしている間は、claim / heartbeat / release を通さない。
+
+# Claude Code のセッションの記録のフォルダ（試験では AUTO_LOOP_CLAUDE_PROJECTS で差し替える）
+function Get-ClaudeProjectsDir {
+    if ($env:AUTO_LOOP_CLAUDE_PROJECTS) { return $env:AUTO_LOOP_CLAUDE_PROJECTS }
+    return (Join-Path $HOME '.claude/projects')
+}
+
+# いまのセッション。Claude Code は子のシェルに CLAUDE_CODE_SESSION_ID・CLAUDE_PID を渡す（2026-11 時点、Windows で確認）。
+# 無い（Claude Code 以外の道具・手で実行）なら $null を返し、セッションの判定はしない（エージェント ID 単位のまま）
+function Get-CurrentSession {
+    $sid = [string]$env:CLAUDE_CODE_SESSION_ID
+    if (-not $sid) { return $null }
+    $procId = 0; $start = ''
+    if ([int]::TryParse([string]$env:CLAUDE_PID, [ref]$procId) -and $procId -gt 0) {
+        try { $start = (Get-Process -Id $procId -ErrorAction Stop).StartTime.ToString('o') } catch { $start = '' }
+    }
+    return [pscustomobject]@{ SessionId = $sid; Pid = $procId; ProcessStart = $start }
+}
+
+# 印のセッションが「生きて手を動かしている」か。戻り値の Live が true なら、ほかのセッションは担当を続けられない。
+#   プロセスが終わっている（pid が無い・開始時刻が違う = 番号の使い回し）→ 手放した
+#   記録の状態（Get-SessionActivity）が limit（上限の解除待ち）・waiting-input（入力待ち）・empty → 手放した
+#   working・stale（長いツールの実行・権限の確認待ちもありうる）→ 生きている
+#   記録が見つからない（プロセスは生きている）→ 確かめられないので、生きているとみなす（二重に進めるより安全）
+function Test-SessionLive {
+    param($Mark, [double]$BusyMinutes = 15, [string]$ProjectsDir = (Get-ClaudeProjectsDir))
+    $sid = if ($Mark -and $Mark.PSObject.Properties['sessionId']) { [string]$Mark.sessionId } else { '' }
+    if (-not $sid) { return [pscustomobject]@{ Live = $false; Reason = 'no-session'; SessionId = '' } }
+    $procId = if ($Mark.PSObject.Properties['pid']) { [int]$Mark.pid } else { 0 }
+    if ($procId -gt 0) {
+        $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        # 終わったプロセスでも、ほかのプロセスがハンドルを持っている間は番号で見つかる（HasExited で見分ける）
+        $exited = $false; if ($p) { try { $exited = $p.HasExited } catch { } }
+        if (-not $p -or $exited) { return [pscustomobject]@{ Live = $false; Reason = 'process-ended'; SessionId = $sid } }
+        $want = if ($Mark.PSObject.Properties['processStart']) { [string]$Mark.processStart } else { '' }
+        if ($want) {
+            try {
+                if ([math]::Abs(($p.StartTime - [datetime]::Parse($want, $null, 'RoundtripKind')).TotalSeconds) -gt 2) { return [pscustomobject]@{ Live = $false; Reason = 'process-ended'; SessionId = $sid } }
+            }
+            catch { }
+        }
+    }
+    $log = $null
+    if (Test-Path -LiteralPath $ProjectsDir) {
+        foreach ($d in @(Get-ChildItem -LiteralPath $ProjectsDir -Directory -ErrorAction SilentlyContinue)) {
+            $f = Join-Path $d.FullName "$sid.jsonl"
+            if (Test-Path -LiteralPath $f) { $log = $f; break }
+        }
+    }
+    if (-not $log) {
+        if ($procId -gt 0) { return [pscustomobject]@{ Live = $true; Reason = 'no-transcript'; SessionId = $sid } }
+        return [pscustomobject]@{ Live = $false; Reason = 'no-transcript'; SessionId = $sid }
+    }
+    $state = (Get-SessionActivity -Path $log -BusyMinutes $BusyMinutes).State
+    return [pscustomobject]@{ Live = ($state -in @('working', 'stale')); Reason = $state; SessionId = $sid }
+}
+
+# 指令リポジトリごとの、PC の中の排他（名前付きミューテックス）。同じスレッドなら入れ子にできる。
+# 取れなければ（TimeoutSeconds 秒）例外。前の持ち主が異常終了していたら（AbandonedMutexException）、そのまま取ったものとして使う
+function Enter-ControlLock {
+    param($Config, [int]$TimeoutSeconds = 180)
+    $path = [IO.Path]::GetFullPath([string]$Config.controlRepoPath).TrimEnd('\', '/').ToLowerInvariant()
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($path))).Substring(0, 16)
+    $m = [Threading.Mutex]::new($false, "Local\auto-loop-control-$hash")
+    $got = $false
+    try { $got = $m.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds)) }
+    catch [Threading.AbandonedMutexException] { $got = $true }
+    if (-not $got) { $m.Dispose(); throw "指令リポジトリの排他を $TimeoutSeconds 秒で取れない（同じ PC の別のセッションが git の操作中）" }
+    return $m
+}
+
+function Exit-ControlLock {
+    param($Lock)
+    if (-not $Lock) { return }
+    try { $Lock.ReleaseMutex() } catch { }
+    $Lock.Dispose()
 }
 
 Export-ModuleMember -Function *

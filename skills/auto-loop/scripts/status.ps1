@@ -52,6 +52,16 @@ $idle = @(Get-IdleDefinitions $cfg)
 $activeDir = Join-Path (Get-LoopHome) 'state/active'
 $active = @()
 if (Test-Path -LiteralPath $activeDir) { $active = @(Get-ChildItem -LiteralPath $activeDir -Filter '*.json' | ForEach-Object { Read-LoopText $_.FullName | ConvertFrom-Json }) }
+# 印のセッションの状態（20261120-no-parallel-sessions）。otherSessionLive が true のタスクは、同じ PC の別のセッションが手を動かしているので、再開の候補にしない
+$session = Get-CurrentSession
+foreach ($m in $active) {
+    $sid = if ($m.PSObject.Properties['sessionId']) { [string]$m.sessionId } else { '' }
+    $mine = [bool]($session -and $sid -and $sid -eq $session.SessionId)
+    $live = if ($sid -and -not $mine) { Test-SessionLive $m } else { $null }
+    $m | Add-Member -NotePropertyName thisSession -NotePropertyValue $mine -Force
+    $m | Add-Member -NotePropertyName otherSessionLive -NotePropertyValue ([bool]($live -and $live.Live)) -Force
+    $m | Add-Member -NotePropertyName sessionState -NotePropertyValue $(if ($mine) { 'this' } elseif ($live) { $live.Reason } else { 'no-session' }) -Force
+}
 
 if ($Json) {
     [pscustomobject]@{
@@ -82,6 +92,9 @@ if ($idle.Count) {
 }
 if ($active.Count) {
     Write-Output 'この PC で進行中の印（state/active）:'
-    foreach ($a in $active) { Write-Output "  $($a.project)/$($a.task)  cwd=$($a.cwd)" }
+    foreach ($a in $active) {
+        $who = if ($a.thisSession) { '  ← このセッション' } elseif ($a.otherSessionLive) { "  ← 別のセッションが作業中（$($a.sessionState)）" } else { '' }
+        Write-Output "  $($a.project)/$($a.task)  cwd=$($a.cwd)$who"
+    }
 }
 Write-LoopLog 'status' "tasks=$($rows.Count) inbox=$inbox"

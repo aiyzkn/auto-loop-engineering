@@ -36,6 +36,7 @@
 2. タスクファイルを読む。`claimed_by` が空で、`status` が `ready`（または自分が担当の `doing` / `waiting` / `blocked`）で、`assignee` が自分に合うことを確かめる
 3. `claimed_by`・`claimed_at`・`heartbeat_at` を書き、`status: doing` にして、**そのファイルだけ**をコミットする（メッセージ `[<ID>] claim <タスク ID>`）
 4. `git push`。**拒否されたら、自分のコミットを取り消して 1 からやり直す**（先に push したエージェントが担当）。push が通るまで、作業を始めない
+5. 同じ PC・同じ ID の別のセッション（上限からの再開と自動起動など）も、同じタスクを二重に進めない。この PC の進行中の印（`state/active/<タスク ID>.json`）に担当したセッションを書き、そのセッションが生きて手を動かしている間は、別のセッションは続けない（Claude Code では `claim.ps1` が終了コード 2 で止める）
 
 ### 作業中
 

@@ -115,6 +115,88 @@ try {
     $c3 = Run 'a' 'claim.ps1' @('claim', $id)
     Check 'a の再主張は継続になる' ($c3.Code -eq 0) $c3.Text
 
+    Write-Output '3b. 同じ PC・同じエージェントの 2 つのセッション（20261120-no-parallel-sessions）'
+    $oldSid = $env:CLAUDE_CODE_SESSION_ID; $oldPid = $env:CLAUDE_PID; $oldProj = $env:AUTO_LOOP_CLAUDE_PROJECTS
+    $sessProj = Join-Path $root 'sess-projects'; New-Item -ItemType Directory -Force (Join-Path $sessProj 'p') | Out-Null
+    $env:AUTO_LOOP_CLAUDE_PROJECTS = $sessProj
+    $holder = Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 600') -PassThru -WindowStyle Hidden
+    try {
+        $sidX = 'sess-x-' + [Guid]::NewGuid().ToString('N').Substring(0, 8); $sidY = 'sess-y-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $logX = Join-Path $sessProj "p/$sidX.jsonl"; $logY = Join-Path $sessProj "p/$sidY.jsonl"
+        $recWork = '{"type":"user","message":{"role":"user","content":"作業して"}}'
+        $recTool = '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}'
+        $recDone = '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"終わりました"}]}}'
+        $recLimit = '{"type":"assistant","error":"rate_limit","apiError":"usage_limit_reached","message":{"role":"assistant","content":[{"type":"text","text":"limit"}]}}'
+        $as = { param($Sid, $ProcId) $env:CLAUDE_CODE_SESSION_ID = $Sid; $env:CLAUDE_PID = "$ProcId" }
+        $markOf = { param($T) Get-Content (Join-Path $root "home-a/state/active/$T.json") -Raw | ConvertFrom-Json }
+        # X は手を動かしている（最後が利用者の入力）
+        [IO.File]::WriteAllText($logX, "$recWork`n", $utf8)
+        $n3 = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '試験: セッション', '-Slug', 'sess', '-Stage', 'implement')
+        $id3 = (($n3.Text -split "`n")[0] -replace '^OK ', '').Trim()
+        Run 'a' 'sync.ps1' @('-Message', 'intake sess') | Out-Null
+        & $as $sidX $holder.Id
+        $s1 = Run 'a' 'claim.ps1' @('claim', $id3)
+        $mark = & $markOf $id3
+        Check 'X が担当し、印にセッションが残る' ($s1.Code -eq 0 -and $mark.sessionId -eq $sidX -and $mark.pid -eq $holder.Id -and $mark.processStart) $s1.Text
+        & $as $sidY $PID
+        $s2 = Run 'a' 'claim.ps1' @('claim', $id3)
+        Check 'Y は claim できない（X が作業中。終了コード 2）' ($s2.Code -eq 2 -and $s2.Text -match '別のセッション') $s2.Text
+        $s3 = Run 'a' 'claim.ps1' @('heartbeat', $id3, '-Note', 'Y から')
+        Check 'Y は heartbeat もできない' ($s3.Code -eq 2) $s3.Text
+        $s4 = Run 'a' 'claim.ps1' @('release', $id3, '-Status', 'ready')
+        Check 'Y は release もできない（印は残る）' ($s4.Code -eq 2 -and (Test-Path (Join-Path $root "home-a/state/active/$id3.json"))) $s4.Text
+        Check 'Y の失敗で作業コピーは汚れない' (-not (Gx $a @('status', '--porcelain')).Text.Trim())
+        $st6 = Run 'a' 'status.ps1' @('-Json', '-NoPull')
+        $act = @(($st6.Text | ConvertFrom-Json).active | Where-Object { $_.task -eq $id3 })
+        Check '一覧（Y から）: 別のセッションが作業中と出る' ($act.Count -eq 1 -and $act[0].otherSessionLive -and $act[0].sessionState -eq 'working') $st6.Text
+        # X が上限で止まった → Y（フォークの再開など）が続けられる
+        [IO.File]::AppendAllText($logX, "$recLimit`n", $utf8)
+        $s5 = Run 'a' 'claim.ps1' @('heartbeat', $id3, '-Note', 'Y が続ける')
+        $mark = & $markOf $id3
+        Check 'X が上限で止まれば、Y が続けられ、印が Y になる' ($s5.Code -eq 0 -and $mark.sessionId -eq $sidY -and $mark.pid -eq $PID) $s5.Text
+        # Y が作業中なら、X が戻ってきても止まる
+        [IO.File]::WriteAllText($logY, "$recTool`n", $utf8)
+        & $as $sidX $holder.Id
+        $s6 = Run 'a' 'claim.ps1' @('heartbeat', $id3, '-Note', 'X から')
+        Check 'Y の作業中に X が戻っても止まる' ($s6.Code -eq 2) $s6.Text
+        # Y が入力待ちになれば、X が続けられる
+        [IO.File]::WriteAllText($logY, "$recDone`n", $utf8)
+        $s7 = Run 'a' 'claim.ps1' @('claim', $id3)
+        Check 'Y が入力待ちなら X が続けられる' ($s7.Code -eq 0 -and (& $markOf $id3).sessionId -eq $sidX) $s7.Text
+        # X のプロセスが終われば、Y が続けられる（記録が作業中の形のままでも）
+        [IO.File]::WriteAllText($logX, "$recWork`n", $utf8)
+        Stop-Process -Id $holder.Id -Force; $holder.WaitForExit()
+        & $as $sidY $PID
+        $s8 = Run 'a' 'claim.ps1' @('release', $id3, '-Status', 'done', '-Note', '試験の後始末')
+        Check 'X のプロセスが終われば、Y が解放できる' ($s8.Code -eq 0) $s8.Text
+        # セッションの情報が無い道具（環境変数が無い）は、エージェント ID 単位のまま
+        & $as $null $null; $env:CLAUDE_PID = $null
+        $n4 = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '試験: セッション無し', '-Slug', 'nosess', '-Stage', 'implement')
+        $id4 = (($n4.Text -split "`n")[0] -replace '^OK ', '').Trim()
+        Run 'a' 'sync.ps1' @('-Message', 'intake nosess') | Out-Null
+        $s9 = Run 'a' 'claim.ps1' @('claim', $id4); $s10 = Run 'a' 'claim.ps1' @('claim', $id4)
+        $mark4 = & $markOf $id4
+        Check 'セッションの情報が無ければ、いまの動きのまま（継続できる・印に sessionId が無い）' ($s9.Code -eq 0 -and $s10.Code -eq 0 -and -not $mark4.PSObject.Properties['sessionId']) "$($s9.Text)`n$($s10.Text)"
+        Run 'a' 'claim.ps1' @('release', $id4, '-Status', 'done') | Out-Null
+        # 指令リポジトリの排他: 別のプロセスが持っている間は取れず、放せば取れる
+        Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
+        $ready = Join-Path $root 'lock-held'
+        $q = { param($S) $S.Replace("'", "''") }
+        $holdCmd = "Import-Module '$(& $q (Join-Path $scripts 'lib/AutoLoop.psm1'))'; `$l = Enter-ControlLock ([pscustomobject]@{ controlRepoPath = '$(& $q $a)' }); New-Item -ItemType File '$(& $q $ready)' | Out-Null; Start-Sleep -Seconds 4; Exit-ControlLock `$l"
+        $lk = Start-Process -FilePath 'pwsh' -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command', $holdCmd)
+        for ($w = 0; $w -lt 150 -and -not (Test-Path $ready); $w++) { Start-Sleep -Milliseconds 100 }
+        $blocked = $false
+        try { $l2 = Enter-ControlLock ([pscustomobject]@{ controlRepoPath = $a }) -TimeoutSeconds 1; Exit-ControlLock $l2 } catch { $blocked = $true }
+        $lk.WaitForExit()
+        $l3 = $null; try { $l3 = Enter-ControlLock ([pscustomobject]@{ controlRepoPath = $a }) -TimeoutSeconds 5 } catch { }
+        Check '指令リポジトリの排他（持たれている間は待ち、放されれば取れる）' ((Test-Path $ready) -and $blocked -and $null -ne $l3)
+        Exit-ControlLock $l3
+    }
+    finally {
+        if (-not $holder.HasExited) { Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue }
+        $env:CLAUDE_CODE_SESSION_ID = $oldSid; $env:CLAUDE_PID = $oldPid; $env:AUTO_LOOP_CLAUDE_PROJECTS = $oldProj
+    }
+
     Write-Output '4. push の競り負け（b の push の直前に a が主張する）'
     $id2 = "$id-2"
     $hook = Join-Path $b '.git/hooks/pre-push'
