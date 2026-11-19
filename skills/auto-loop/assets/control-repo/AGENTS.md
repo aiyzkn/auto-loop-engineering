@@ -132,7 +132,7 @@
 
 1. `inbox.md` の「手が空いた時に実行するタスク」に定義されたもの（上から順。`間隔` の内に実施済みのものは飛ばす）
 2. 定義が無い・すべて実施済みなら、次のうち 1 つ
-   - `~/CLAUDE.md` やその他の設定ファイル（`~/.claude/` のスキル・設定、各リポジトリの `CLAUDE.md` / `AGENTS.md`）の整理
+   - `~/.claude/CLAUDE.md` やその他の設定ファイル（`~/.claude/` のスキル・設定、各リポジトリの `CLAUDE.md` / `AGENTS.md`）の整理
    - 過去に実装した既存のアプリケーション（`projects/` の案件）のリファクタリング
    - 仕様・機能の追加の提案
    - ドキュメントの拡充
@@ -141,7 +141,7 @@
 
 - **通常のタスクと同じに起票してから行う**（`source: idle`、`priority: low`）。案件に属さないもの（定義の案件が `設定`）は起票せず、結果を利用者に報告する
 - 定義そのものは `inbox.md` に残す（消さない）。行ったら、その定義の `最終実施:` の行を書き換える（`最終実施: <日付> <タスク ID か 1 行の結果>`）。`間隔` の判定はこの行で行う
-- 段階は、定義に `段階:` があればそれ、無ければ `propose`（提案だけ）。**マージはしない**。`~/CLAUDE.md`・`settings.json` などグローバルの設定の書き換えは [policy.md](policy.md) の「常に個別の承認が要る操作」なので、変更の案（差分）を作って `status: waiting` で承認を待つ
+- 段階は、定義に `段階:` があればそれ、無ければ `propose`（提案だけ）。**マージはしない**。`~/.claude/CLAUDE.md`・`settings.json` などグローバルの設定の書き換えは [policy.md](policy.md) の「常に個別の承認が要る操作」なので、変更の案（差分）を作って `status: waiting` で承認を待つ
 - **利用枠を使いすぎない**
   - 1 回に 1 件。終わったら次の手が空いた機会まで行わない（続けて次々に行わない）
   - サブエージェントへの委任・並列をしない
@@ -155,9 +155,9 @@
 | やること | コマンド（`pwsh -NoProfile -File <scripts>/...`） |
 |---|---|
 | 一覧 | `status.ps1 [-Mine] [-Project <案件>]` |
-| 起票 | `new-task.ps1 -Project <案件> -Title <件名> -Slug <短い名前> -Stage <段階> [-Priority <urgent / high / normal / low>] [-Source <inbox / direct / idle>]` |
+| 起票 | `new-task.ps1 -Project <案件> -Title <件名> -Slug <短い名前> -Stage <段階> [-Priority <urgent / high / normal / low>] [-Source <inbox / direct / file / idle>]` |
 | 担当・印・解放 | `claim.ps1 <claim / heartbeat / release / takeover> <タスク ID> [-Status ...] [-Note ...]` |
 | 同期 | `sync.ps1 -Message <要約>` / `sync.ps1 -PullOnly` |
 | 着手前の確認 | `preflight.ps1 -Project <案件>` |
 | 次にやることを決める（7 章） | `/auto-loop next`（手順。判断の材料は `status.ps1 -Json`） |
-| 起動時・スリープ解除時の自動起動 | `install.ps1 -NoCopy -EnableKick`（止めるときは `-DisableKick`）。判断だけを見る: `kick.ps1 -DryRun` |
+| 起動時・スリープ解除時の自動起動 | `install.ps1 -NoCopy -EnableKick [-KickIntervalMinutes <分>]`（止めるときは `-DisableKick`）。判断だけを見る: `kick.ps1 -DryRun` |
