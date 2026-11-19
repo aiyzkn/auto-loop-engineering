@@ -23,6 +23,7 @@
 
 ```powershell
 pwsh -NoProfile -File tests/smoke.ps1
+pwsh -NoProfile -File tests/smoke.ps1 -SkillsRepo <yzkn/skills の clone>   # 配布先とのずれも見る（配布の前後に）
 ```
 
 一時フォルダで完結し、ネットワークと `~/.claude` には触れない。スクリプトの挙動を変えたら、試験も足す。
