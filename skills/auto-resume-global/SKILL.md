@@ -46,6 +46,7 @@ Claude Code の利用上限（5 時間・週）で対話セッションが止ま
                       ├─ action=wake          ─▶ keep-awake.ps1 で、解除時刻 + 3 分 + 20 分 まで PC をスリープさせない (再開はしない)
                       └─ action=resume（既定）─▶ 新しいウィンドウで
                                                  claude --resume <id> --fork-session --remote-control <名前> --permission-mode <元のモード> "続けて…"
+                                                 （裏で archive-remote-session.ps1: 新しい方の Remote Control がつながったら、前のセッションのものを archive）
 ```
 
 | 状況 | どうなるか |
@@ -87,7 +88,7 @@ auto-resume.ps1（ログオン時など）
 
 再開したセッションがまた上限に当たれば、その記録に新しい上限の記録が付き、次の解除時刻にもう一度処理する。
 
-解除済みなのに再開しないもの（保留・作業ディレクトリが無いなど）は、理由を `logs/auto-resume.log` に書く。何か起動した・保留した・10 秒より長くかかった巡回は「終了 (上限で停止 n、再開 n、待機 n、所要 s 秒)」も書く。`debugLog: true` なら毎回の「開始」「終了」を書く。同時に 2 つは動かず、後から起動したものは先の実行を 120 秒まで待つ。
+解除済みなのに再開しないもの（保留・作業ディレクトリが無いなど）は、理由を `logs/auto-resume.log` に書く。前の巡回で再開を待っていたのに、解除の前に利用者が入力した（手で再開した）などで対象でなくなったものも、「再開しない <ID> : … に再開する予定だったが、…」と書く（復帰タスクは消える）。何か起動した・保留した・10 秒より長くかかった巡回は「終了 (上限で停止 n、再開 n、待機 n、所要 s 秒)」も書く。`debugLog: true` なら毎回の「開始」「終了」を書く。同時に 2 つは動かず、後から起動したものは先の実行を 120 秒まで待つ。
 
 ### 上限で止まったらスリープする (任意。`install.ps1 -EnableSleepOnLimit`)
 
@@ -100,13 +101,14 @@ auto-resume.ps1（ログオン時など）
                 ├─ gh / glab の認証を確かめる (PATH にあるときだけ。各 10 秒まで)
                 └─ 確認の画面 (既定 120 秒の残り時間)
                       ├─ 「今すぐスリープ」 ─▶ Windows をスリープ (SetSuspendState)
-                      ├─ 応答が無いまま時間切れ ─▶ スリープ。ただし解除まで sleepMaxHours (既定 12 時間) より長ければスリープしない
+                      ├─ 応答が無いまま時間切れ ─▶ スリープ。ただし解除まで sleepMaxHours (既定 12 時間。週の上限で復帰タスクがあれば sleepMaxHoursWeekly、既定 192 時間) より長ければスリープしない
                       └─ 「キャンセル」/ 閉じる ─▶ 何もしない
 ```
 
 - 確認の画面には、上限の種類・解除時刻・復帰タスクの時刻を出す。復帰タスクが無い・スリープ解除タイマーが無効・バッテリ駆動中なら、その旨も出す (スリープしても解除時刻に起きない場合がある)
 - `gh` / `glab` の認証が切れていれば、その旨も出す (再開したセッションの push / PR / MR が止まるため)。判定は終了コードだけで、出力 (トークンなど) は表示しない。`sleep-prompt.ps1 -CheckAuthOnly` で、これだけを確かめられる
-- 解除まで `sleepMaxHours` より長い (週の上限など) ときは、画面にも「時間が過ぎてもスリープしない」と出す。人が PC の前にいるのに、何日も先の解除のためにスリープさせない
+- 解除まで `sleepMaxHours` より長いときは、画面にも「時間が過ぎてもスリープしない」と出す。人が PC の前にいるのに、何日も先の解除のためにスリープさせない
+- 週の上限 (`seven_day` で始まる種類) は、解除まで数日あるのが普通なので、復帰タスクが登録できていれば `sleepMaxHoursWeekly` (既定 192 時間 = 8 日) で判断する。復帰タスクは解除時刻 (上限の記録の `resetsAt`。例 木曜 08:00) + `marginMinutes` の絶対時刻で登録されるので、何日眠っても解除時刻に起きる。復帰タスクが無ければ `sleepMaxHours` のまま。人が PC の前にいるなら、確認の画面で「キャンセル」する
 - 複数のセッションが同時に上限に当たっても、確認は 1 つ (Mutex)
 - 解除時刻に起こされたあとは、既定の `resume` の動作で、新しいウィンドウで続きから再開する（再開した claude が動いている間はスリープさせない）
 
@@ -122,10 +124,12 @@ auto-resume.ps1（ログオン時など）
 | `sleep-on-limit.ps1` | (任意) Claude Code の StopFailure フック。sleep-prompt.ps1 を起動してすぐ終わる |
 | `sleep-prompt.ps1` | (任意) 上限の記録の確認・復帰タスクの登録・認証の確認・確認の画面・スリープ。`-DryRun` で判断だけをログに書く。`-CheckAuthOnly` で gh / glab の認証だけを確かめる |
 | `resume-session.ps1` | （`resume`）新しいウィンドウの中で claude を再開する。終わるまで PC をスリープさせない |
+| `archive-remote-session.ps1` | （`resume`）前のセッションの Remote Control のセッションを archive する（resume-session.ps1 が裏で起動）。`-DryRun` で、archive する ID と URL だけを表示する |
 | `run-hidden.vbs` | 使っていない（タスクは `conhost.exe --headless` で起動する）。前の版で登録したタスクのために残している |
 | `config.json` | 設定（下表） |
 | `state/handled.json` / `logs/auto-resume.log` | 処理済みの記録（14 日で消す） / 実行の記録（1 MB で切り替え） |
 | `state/running/<ID>.json` | 再開した claude が動いている印。再起動で中断したかの判断に使う |
+| `state/waiting.json` | 再開を待っているセッションと予定時刻。次の巡回で待たなくなったものの理由をログに書くのに使う |
 | `disabled` | このファイルがあれば何もしない（一時停止） |
 
 | 設定 | 既定値 | 意味 |
@@ -136,12 +140,14 @@ auto-resume.ps1（ログオン時など）
 | `sleepPromptSeconds` | `120` | スリープするまでの確認の秒数 (応答が無ければスリープ) |
 | `sleepMinMinutes` | `15` | 解除までこの分より短ければスリープしない |
 | `sleepMaxHours` | `12` | 解除までこの時間より長ければ、確認の時間が過ぎてもスリープしない (「今すぐスリープ」ならスリープする) |
+| `sleepMaxHoursWeekly` | `192` | 週の上限 (`seven_day` 系) で復帰タスクがあるときに、`sleepMaxHours` の代わりに使う。12 などにすれば、前の版と同じく週の上限ではスリープしない |
 | `debugLog` | `false` | `true` なら、巡回のたびに「開始」「終了」の行をログに書く (復帰したのに再開されないときの調べ用) |
 | `permissionMode` | `fromSession` | （`resume`）再開時の権限モード。止まったセッションと同じにする。`manual` などに固定もできる |
 | `fallbackPermissionMode` | `manual` | （`resume`）セッションの記録にモードが無いとき |
 | `forkSession` | `true` | （`resume`）新しいセッション ID に分けて再開する |
 | `remoteControl` | `true` | （`resume`）再開した claude を `--remote-control` つきで起動する（起動後に `/remote-control` を実行したのと同じ）。再開は別のセッションになり元のリモート接続は切れるので、スマートフォンの Claude アプリなどから新しいセッションへ接続し直せるようにする |
 | `remoteControlName` | `""` | （`resume`）Remote Control のセッション名。空なら `<フォルダー名> (上限後の再開 MM/dd HH:mm)`（再起動からの再開は「再起動後の再開」） |
+| `archivePreviousRemoteSession` | `true` | （`resume`、`forkSession` のとき）前のセッションに付いていた Remote Control のセッションを archive する。claude が終了時に archive するのは正常に終わったときだけで、止まったウィンドウが開いたまま・再起動で強制終了だと一覧に残って紛らわしいため。前のセッションの記録の `bridge-session` の行からブリッジの ID（`cse_…`）を読み、新しい方がつながってから（最大 300 秒待つ。つながらなければ残す）、Claude Code と同じ API（`POST /v1/code/sessions/<id>/archive`）を Claude Code のログイン情報で呼ぶ。トークンは更新しない。結果は `logs/auto-resume.log` に `archive-remote:` で書く。archive は削除ではない（Claude Code にも unarchive の API がある） |
 | `marginMinutes` / `fallbackWaitMinutes` | `3` / `60` | 解除時刻から待つ分 / 解除時刻が記録に無いときに待つ分 |
 | `maxAgeHours` | `192` | これより前に止まったセッションは扱わない |
 | `excludeCwd` | `[]` | 扱わない作業ディレクトリ（ワイルドカード可） |

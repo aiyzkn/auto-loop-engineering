@@ -78,6 +78,7 @@ pwsh -File ~/.claude/skills/auto-resume-global/scripts/install.ps1 -EnableWakeTi
      | 上限のあとに入力あり | 対象外 |
    - `keep-awake.ps1 -Minutes 2` を 2 つ続けて起動し、先のものが止まって後のものだけが残ること（同時に 1 つ）
    - 起動まで確かめるときは、インストール先のコピーで `config.json` の `claudePath` を引数を記録する代役に替える。作業ディレクトリと引数（`--resume <id> --fork-session --session-id <分岐先> --remote-control <名前> --permission-mode <モード> <指示>`。`remoteControl: false` なら `--remote-control` は付かない）を確かめる
+   - 前のセッションの Remote Control の archive は `archive-remote-session.ps1 -SessionId <前のセッション> -NewSessionId <新しいセッション> -DryRun` で、記録から読んだブリッジの ID（`cse_…`）と呼ぶ URL を確かめる。前のセッションの記録に `bridge-session` の行が無ければ skip、新しい方に無ければ（`-DryRun` でないとき）300 秒待って skip
 4. (`-EnableSleepOnLimit` の場合) スリープの判断を確かめる。試験用のセッション記録 (最後の会話が上限の記録) を作り、
    `sleep-prompt.ps1 -DryRun -TranscriptPath <記録> -SimulateClick cancel` (または `sleep`、`-Seconds 3` で時間切れ) を実行して、`logs/auto-resume.log` に「キャンセル」「スリープする」と書かれること。
    上限の記録が無い記録では「スリープしない: 利用上限の記録が無い」、解除まで 15 分未満では「スリープしない」と書かれること
@@ -98,7 +99,8 @@ pwsh -File ~/.claude/skills/auto-resume-global/scripts/install.ps1 -EnableWakeTi
    | 上限の記録の `timestamp` が 20 秒前（`resetsAt` は過ぎている） | 1 回目に「保留 … 上限の記録が新しい (n 秒前)」、約 40 秒後の 2 回目に「再開」。代役の claude は 1 回だけ起動し、`handled.json` に書かれ、`state/running/<分岐先の ID>.json` が現れる |
    | 同じ写しで 2 つ同時に起動 | 後のほうは Mutex を待ってから動き、処理済みとして何もせずに「終了」を書く（黙って終わらない） |
    | `apiError = model_requires_usage_credits` の記録 | `auto-resume.ps1 -DryRun` が解除時刻 + 3 分まで「待機」。`sleep-prompt.ps1 -DryRun -SimulateClick cancel` が上限の記録を見つける |
-   | 解除まで `sleepMaxHours` より長い記録 | `sleep-prompt.ps1 -DryRun -Seconds 3` が「スリープしない: 解除まで n 時間 (sleepMaxHours m 時間を超える)」 |
+   | 解除まで `sleepMaxHours` より長い記録（5 時間の上限、または復帰タスクが無い週の上限） | `sleep-prompt.ps1 -DryRun -Seconds 3` が「スリープしない: 解除まで n 時間 (sleepMaxHours m 時間を超える)」 |
+   | 週の上限（`seven_day`）で解除まで 2 日など、復帰タスクがある記録 | `sleep-prompt.ps1 -DryRun -Seconds 3` が「スリープする (timeout: seven_day、…)」。解除まで `sleepMaxHoursWeekly` より長ければ「スリープしない: … (sleepMaxHoursWeekly …)」 |
 8. 認証の確かめ方を見る。`sleep-prompt.ps1 -CheckAuthOnly` が「認証は有効です」か、切れているものの注意を出すこと
 
 ## 6. 既知の制約
@@ -142,6 +144,10 @@ pwsh -File ~/.claude/skills/auto-resume-global/scripts/install.ps1 -EnableWakeTi
 
 同じ日、再開は別のセッション (`--fork-session`) になるため、元のセッションに張っていた Remote Control の接続が切れ、スマートフォンから続きを見られなくなった。そこで、再開する claude を `--remote-control <名前>` つき (起動後に `/remote-control` を実行したのと同じ) で起動するようにした (`remoteControl`。既定 `true`)。名前は省略できる引数なので、後ろの指示を名前と取り違えないよう、常に名前を渡す。
 
+2026-11-15 には、再開したあと、スマートフォンの Remote Control の一覧に前のセッションも残り、どちらが続きか紛らわしかった。claude は終了時に自分のブリッジのセッションを archive する（`[bridge:shutdown] Archiving …`）が、上限で止まったウィンドウが開いたままのときや、再起動で強制終了されたときは、それが走らない。そこで、再開したときに、前のセッションの記録の `bridge-session` の行からブリッジの ID を読み、新しい方がつながってから、Claude Code と同じ API（`POST /v1/code/sessions/<cse_…>/archive`、404 なら `/v1/sessions/<session_…>/archive`）で archive するようにした（`archive-remote-session.ps1`、`archivePreviousRemoteSession`。既定 `true`）。ログイン情報は読むだけで、トークンの更新はしない（更新すると、動いている claude のトークンと食い違うおそれがある）。
+
+同じ日の 18:43 の復帰では、ログに何も書かれず、復帰タスクだけが消えていた。上限の解除 (18:40) の前の 18:42:56 に、利用者が止まったウィンドウに入力して手で再開しており、最後の会話の記録が上限の記録でなくなったため、巡回は対象を見つけず、復帰タスクを黙って消していた。二重に再開しない動作は正しいが、後から見て動いたのか分からない。そこで、再開を待っているセッションを `state/waiting.json` に覚え、次の巡回で再開も待ちもしなくなったものは、理由（上限の記録のあとに会話が続いている、など）をログに書くようにした。
+
 2026-11-13 には、バックグラウンドのサブエージェント 4 本を動かしている間に上限で止まったセッションが、スリープも解除後の再開もされなかった。上限の記録のあとに、サブエージェントが失敗したという通知が `user` の記録（`origin.kind = task-notification`）として付き、「最後の会話の記録」が上限の記録でなくなっていた。巡回は「上限のあとに利用者が入力した」とみなし、スリープの確認は「利用上限の記録が無い」とみなしていた。そこで、利用者の入力ではない `user` の記録を飛ばして最後の会話の記録を探すようにした（`auto-resume.ps1` の `Test-SyntheticUser`、`sleep-prompt.ps1` の `$isSynthetic`）。利用者が実際に入力した記録（`origin.kind = human`）は飛ばさない。あわせて、再開時の指示に「サブエージェントも止まっていれば、起動し直さず続きから」を足した。止まった時点の実物の記録の写しで、`-DryRun` の判断が「再開」になることを確かめた。
 
 2026-11-14 には、解除時刻に復帰タスクで PC が起きたのに再開されず、2 分ほどでまたスリープした。巡回は 38 秒動いたが、何も起動せず、ログも書かず、復帰タスクを消していた。その時点の記録の写しでは判断は「再開」になるので、実行時の状態で飛ばされた。黙って飛ばす箇所は「書き込み中」（記録の更新が 1 分以内）の 1 つだけで、飛ばしたセッションは次の復帰時刻にも数えなかった（復帰した直後の claude は動き出していたが、記録を書いたかは確かめられなかった）。また、末尾 80 行に 30 万文字を超える行があると `Get-Content -Tail` が 30 秒以上かかり、そのぶん無人のスリープのタイムアウトに近づいていた。同じ日に、別の形の上限の記録（`model_requires_usage_credits`）をスリープの確認だけが上限とみなさなかったこと、解除が 5 日後の週の上限でも確認の時間切れでスリープしたこと、タスクの起動に使う VBScript が Windows から外されていく（`VBScriptDeprecationAlert`）ことも分かった。そこで次のようにした。
@@ -155,6 +161,8 @@ pwsh -File ~/.claude/skills/auto-resume-global/scripts/install.ps1 -EnableWakeTi
 - タスクは `conhost.exe --headless` で起動する（VBScript を使わない）
 - 解除まで `sleepMaxHours`（既定 12 時間）より長ければ、確認の時間切れでスリープしない
 - スリープの前に `gh` / `glab` の認証を確かめ、切れていれば確認の画面に出す（`-CheckAuthOnly` で単独でも確かめられる）
+
+2026-11-17 05:14 には、週の上限（`seven_day`、解除 11/19 08:00）で止まったが、解除まで 50.8 時間で `sleepMaxHours` を超えたため、確認の時間切れでもスリープしなかった（復帰タスク 11/19 08:03 は登録できていた）。利用者は、人がいないときは週の上限でもスリープさせたい。復帰タスクは解除時刻の絶対時刻で登録されるので、眠っている長さによらず解除時刻に起きる。そこで、週の上限で復帰タスクがあるときは、別の上限 `sleepMaxHoursWeekly`（既定 192 時間）で判断するようにした。人が PC の前にいるなら、確認の画面でキャンセルできる（11/14 に問題とみなした「5 日後の解除でもスリープした」動作を、週の上限で復帰タスクがある場合に限って戻したことになる）。
 
 2026-11-14 には、インストール先のフォルダ（`~/.claude/auto-resume`）とタスク名（`ClaudeAutoResume`）を、スキル名に合わせて `~/.claude/auto-resume-global` と `ClaudeAutoResumeGlobal` に改めた。同じリポジトリにプロジェクト単位の別のスキル `auto-resume` があり、人が見たときに区別しにくかったためである。Mutex と型の名前もそろえた。前の版からは `install.ps1` を実行し直すだけで移行できる。
 
