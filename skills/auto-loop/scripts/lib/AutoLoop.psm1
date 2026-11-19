@@ -385,6 +385,92 @@ function Get-BusySessions {
     return [pscustomobject]@{ Working = $working; Idle = $idle }
 }
 
+# 記録の timestamp（ローカル時刻）。無い・読めなければ $null
+function Get-RecordTime {
+    param($Record)
+    if (-not ($Record.PSObject.Properties['timestamp'] -and $Record.timestamp)) { return $null }
+    try { return ([datetimeoffset]::Parse([string]$Record.timestamp)).LocalDateTime } catch { return $null }
+}
+
+# セッションの記録の 1 行が利用上限の記録か（auto-resume-global の Test-LimitRecord と同じ判定）。上限なら次を、違えば $null を返す。
+#   apiError が usage_limit_reached / model_requires_usage_credits、または error が rate_limit で解除時刻のあるもの（無いものは一時的な 429）
+#   ResetAt: 解除時刻（ローカル。記録に無ければ $null）/ Kind: rateLimitType（無ければ apiError）/ At: 記録の timestamp（無ければ $null）
+function Get-LimitRecordInfo {
+    param($Record)
+    if (-not $Record -or $Record.type -ne 'assistant') { return $null }
+    $byApi = [bool]($Record.PSObject.Properties['apiError'] -and $Record.apiError -in @('usage_limit_reached', 'model_requires_usage_credits'))
+    $byRate = [bool]($Record.PSObject.Properties['error'] -and $Record.error -eq 'rate_limit')
+    if (-not ($byApi -or $byRate)) { return $null }
+    $infos = @()
+    if ($Record.PSObject.Properties['apiErrorParams'] -and $Record.apiErrorParams -and $Record.apiErrorParams.PSObject.Properties['rate_limit_info']) { $infos += $Record.apiErrorParams.rate_limit_info }
+    if ($Record.PSObject.Properties['quotaLimits'] -and $Record.quotaLimits) { $infos += $Record.quotaLimits }
+    $info = @($infos | Where-Object { $_ -and $_.PSObject.Properties['resetsAt'] -and $_.resetsAt } | Select-Object -First 1)
+    if (-not $byApi -and $info.Count -eq 0) { return $null }
+    $reset = $null; $kind = ''
+    if ($info.Count -gt 0) {
+        try { $reset = [DateTimeOffset]::FromUnixTimeSeconds([long]$info[0].resetsAt).LocalDateTime } catch { }
+        if ($info[0].PSObject.Properties['rateLimitType']) { $kind = [string]$info[0].rateLimitType }
+    }
+    if (-not $kind) { $kind = if ($byApi) { [string]$Record.apiError } else { 'rate_limit' } }
+    return [pscustomobject]@{ ResetAt = $reset; Kind = $kind; At = (Get-RecordTime $Record) }
+}
+
+# セッションの記録から「まだ解除されていない利用上限」を探す（kick.ps1 の 4.。依頼 20261119-kick-limit-from-records）。
+# 復帰タスク（auto-resume-global）が無くても、上限で止まっているときに起こさないために使う。
+#   1. LookbackHours 時間の内に書かれた記録（本体・サブエージェント）のうち、resetsAt を含むものだけを読み、上限の記録を探す
+#   2. resetsAt + MarginMinutes が Now より先のものを候補にする（resetsAt の無い上限は、解除時刻が分からないので使わない）
+#   3. 上限はアカウント単位なので、どの記録でも、上限の記録より後に普通の assistant の応答があれば、解除済みとみなして捨てる
+#      （上限のあとに利用者が入力しただけ・また上限、なら解除されていない）
+#   4. 残ったうち、解除時刻が最も遅いものを返す（ResetAt・Kind・At・SessionId・Project）。無ければ $null
+# 記録の形は Claude Code の内部形式（2026-11 時点）。版が変わったら実物に合わせて直す
+function Find-PendingLimit {
+    param([string]$ProjectsDir, [double]$LookbackHours = 170, [double]$MarginMinutes = 3, [datetime]$Now = (Get-Date))
+    if (-not (Test-Path -LiteralPath $ProjectsDir)) { return $null }
+    $rootDir = (Get-Item -LiteralPath $ProjectsDir).FullName
+    $files = @(Get-ChildItem -LiteralPath $rootDir -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $Now.AddHours(-$LookbackHours) })
+    if ($files.Count -eq 0) { return $null }
+    # 末尾（Read-SessionTailLines の 4MB）だけを読み、行は -like / -match でまとめて絞る
+    # （ファイル全体の Select-String・1 行ずつの比較は、この PC の 1 週間分 440MB で 5〜7 秒かかった）
+    $cands = @()
+    foreach ($f in $files) {
+        $hits = @(@((Read-SessionTailLines $f.FullName) -like '*"resetsAt"*') -match '"(apiError|error)"\s*:\s*"(usage_limit_reached|model_requires_usage_credits|rate_limit)"')
+        if ($hits.Count -eq 0) { continue }
+        $path = $f.FullName
+        $parts = @($path.Substring($rootDir.Length).TrimStart('\', '/') -split '[\\/]')
+        $sid = if ($parts.Count -ge 3) { $parts[1] } else { [IO.Path]::GetFileNameWithoutExtension($path) }   # サブエージェントの記録なら本体の ID
+        foreach ($l in $hits) {
+            $l = $l.TrimEnd("`r")
+            if (-not $l.StartsWith('{')) { continue }
+            try { $r = $l | ConvertFrom-Json } catch { continue }
+            $li = Get-LimitRecordInfo $r
+            if (-not $li -or -not $li.ResetAt -or $li.ResetAt.AddMinutes($MarginMinutes) -le $Now) { continue }
+            $cands += [pscustomobject]@{ ResetAt = $li.ResetAt; Kind = $li.Kind; At = $li.At; SessionId = $sid; Project = $parts[0] }
+        }
+    }
+    if ($cands.Count -eq 0) { return $null }
+    # 3. 上限の記録より後の普通の応答。最も早い上限の記録より後に書かれたファイルだけを、末尾から読む
+    $known = @($cands | Where-Object { $_.At } | ForEach-Object { $_.At })
+    $lastOk = $null
+    if ($known.Count -gt 0) {
+        $earliest = ($known | Measure-Object -Minimum).Minimum
+        foreach ($f in @($files | Where-Object { $_.LastWriteTime -gt $earliest })) {
+            $lines = @((Read-SessionTailLines $f.FullName) -like '*"assistant"*')
+            for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+                $l = $lines[$i].TrimEnd("`r")
+                if (-not $l.StartsWith('{')) { continue }
+                try { $r = $l | ConvertFrom-Json } catch { continue }
+                if ($r.type -ne 'assistant') { continue }
+                if (($r.PSObject.Properties['apiError'] -and $r.apiError) -or ($r.PSObject.Properties['error'] -and $r.error) -or ($r.PSObject.Properties['isApiErrorMessage'] -and $r.isApiErrorMessage)) { continue }
+                $t = Get-RecordTime $r
+                if ($t) { if (-not $lastOk -or $t -gt $lastOk) { $lastOk = $t }; break }   # このファイルの最後の普通の応答だけを見ればよい
+            }
+        }
+    }
+    $pending = @($cands | Where-Object { -not ($lastOk -and $_.At -and $lastOk -gt $_.At) })
+    if ($pending.Count -eq 0) { return $null }
+    return ($pending | Sort-Object ResetAt -Descending | Select-Object -First 1)
+}
+
 # セッションの記録から、週の上限（rateLimitType が seven_day で始まる）の解除時刻を探す。Since より後に書かれた記録だけを読む。
 # 見つかった中で最も遅い解除時刻（ローカル時刻）を返す。無ければ $null。記録の形は Claude Code の内部形式（2026-11 時点）
 function Find-WeeklyResetFromTranscripts {
