@@ -5,13 +5,19 @@
 .DESCRIPTION
   ネットワーク・GitHub・利用者の ~/.claude には触れない（AUTO_LOOP_HOME を一時フォルダに向ける）。
   確かめること: 起票 → 一覧 → 担当の主張 → 二重の主張の拒否 → push の競り負け → 印 → 引き継ぎ → 主張の喪失の検出 → 解放と保管 → 同期の競合 → 着手前の確認
-              → 優先度（緊急）と一覧の順 → 自動起動の判断（kick.ps1 -DryRun。セッションは起こさない）→ 手が空いた時のタスクの定義 → 再開の指示の案内
+              → 優先度（緊急）と一覧の順 → 自動起動の判断（kick.ps1 -DryRun。セッションは起こさない）→ 手が空いた時のタスクの定義 → 再開の指示の案内 → 配布先とのずれ（比べ方）
   自動起動・自動再開の場所は、環境変数（AUTO_LOOP_AUTO_RESUME_HOME・AUTO_LOOP_CLAUDE_PROJECTS）で一時フォルダに向ける。タスクスケジューラには触れない
 .EXAMPLE
   pwsh -NoProfile -File tests/smoke.ps1
   pwsh -NoProfile -File tests/smoke.ps1 -Keep    # 一時フォルダを残す
+  pwsh -NoProfile -File tests/smoke.ps1 -SkillsRepo <yzkn/skills の clone>   # 配布先とのずれも見る（手元に取得済みの upstream/main と。取得はしない）
 #>
-param([switch]$Keep)
+param(
+    [switch]$Keep,
+    [string]$SkillsRepo = '',            # 配布先 yzkn/skills の clone（空なら AUTO_LOOP_SKILLS_REPO。どちらも無ければ実物との比較は飛ばす）
+    [string]$SkillsRef = 'upstream/main', # 配布先の比べる版（手元に取得済みのもの）
+    [string]$KitRef = 'HEAD'              # キット（正本）の比べる版
+)
 $ErrorActionPreference = 'Stop'
 $scripts = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/auto-loop/scripts'
 $root = Join-Path ([IO.Path]::GetTempPath()) ('auto-loop-smoke-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -36,6 +42,27 @@ function Gx([string]$Dir, [string[]]$GitArgs) {
 }
 $utf8 = [Text.UTF8Encoding]::new($false)
 try { [Console]::OutputEncoding = $utf8 } catch { }
+
+# キット（正本）と配布先（yzkn/skills）の対応。値は git の blob・ツリーの値で比べる（改行の展開に左右されない）
+$distMap = @(
+    [pscustomobject]@{ Name = 'auto-loop'; Kit = 'skills/auto-loop'; Dist = 'packages/claude-skill-auto-loop/skills/auto-loop' }
+    [pscustomobject]@{ Name = 'auto-resume-global/SKILL.md'; Kit = 'skills/auto-resume-global/SKILL.md'; Dist = 'packages/claude-skill-auto-resume-global/skills/auto-resume-global/SKILL.md' }
+    [pscustomobject]@{ Name = 'auto-resume-global/scripts'; Kit = 'skills/auto-resume-global/scripts'; Dist = 'packages/claude-skill-auto-resume-global/skills/auto-resume-global/scripts' }
+    [pscustomobject]@{ Name = 'auto-resume-global/README.md'; Kit = 'skills/auto-resume-global/README.md'; Dist = 'packages/claude-skill-auto-resume-global/README.md' }
+    [pscustomobject]@{ Name = 'auto-resume-global/MANUAL.md'; Kit = 'skills/auto-resume-global/MANUAL.md'; Dist = 'packages/claude-skill-auto-resume-global/MANUAL.md' }
+)
+function Compare-Distribution([string]$KitDir, [string]$KitRef, [string]$DistDir, [string]$DistRef) {
+    $val = { param($Dir, $Spec) $r = Gx $Dir @('rev-parse', '--verify', '-q', $Spec); if ($r.Code -eq 0) { $r.Text.Trim() } else { '(無い)' } }
+    foreach ($m in $distMap) {
+        $k = & $val $KitDir "${KitRef}:$($m.Kit)"; $d = & $val $DistDir "${DistRef}:$($m.Dist)"
+        [pscustomobject]@{ Name = $m.Name; Same = ($k -eq $d -and $k -ne '(無い)'); KitValue = $k; DistValue = $d }
+    }
+    # 配布先のスキルのフォルダに、キットに無いものが足されていないか（README・MANUAL はパッケージの直下へ、DISTRIBUTION.md は配らない）
+    $names = { param($Dir, $Spec) $r = Gx $Dir @('ls-tree', '--name-only', $Spec); if ($r.Code -eq 0) { (@($r.Text -split "`n" | ForEach-Object { Split-Path -Leaf $_.Trim() } | Where-Object { $_ }) | Sort-Object) -join ',' } else { '(無い)' } }
+    $kn = (@((& $names $KitDir "${KitRef}:skills/auto-resume-global") -split ',' | Where-Object { $_ -notin @('README.md', 'MANUAL.md', 'DISTRIBUTION.md') })) -join ','
+    $dn = & $names $DistDir "${DistRef}:packages/claude-skill-auto-resume-global/skills/auto-resume-global"
+    [pscustomobject]@{ Name = 'auto-resume-global の中身（名前）'; Same = ($kn -eq $dn); KitValue = $kn; DistValue = $dn }
+}
 
 try {
     $a = Join-Path $root 'ctl-a'; $b = Join-Path $root 'ctl-b'; $bare = Join-Path $root 'ctl.git'
@@ -326,6 +353,36 @@ try {
     Check '前の版の案内を置き換え、無いほうには足す' ($arj.resumePrompt -match '/auto-loop next' -and $n1 -eq 1 -and $arj.rebootResumePrompt -match '/auto-loop next' -and (Get-ChildItem (Join-Path $root 'home-c/state') -Filter 'auto-resume-global.config.*.json').Count -eq 1) $l1.Text
     $l2 = Run 'c' 'install.ps1' @('-NoCopy', '-LinkAutoResume')
     Check '2 回目は何もしない' ($l2.Text -match '案内は入っている')
+
+    Write-Output '13. 配布先とのずれ（比べ方は一時の git で確かめる）'
+    $kf = Join-Path $root 'kit-fake'; $sf = Join-Path $root 'skills-fake'
+    foreach ($d in @($kf, $sf)) { & git init -q -b main $d; Gx $d @('config', 'user.email', 'smoke@example.invalid') | Out-Null; Gx $d @('config', 'user.name', 'smoke') | Out-Null }
+    $put = { param($Base, $Rel, $Text) $p = Join-Path $Base $Rel; New-Item -ItemType Directory -Force (Split-Path -Parent $p) | Out-Null; [IO.File]::WriteAllText($p, $Text, $utf8) }
+    foreach ($m in $distMap) {
+        $isDir = $m.Name -match 'auto-loop$|scripts$'
+        foreach ($pair in @(@($kf, $m.Kit), @($sf, $m.Dist))) { if ($isDir) { & $put $pair[0] "$($pair[1])/a.ps1" "x $($m.Name)" } else { & $put $pair[0] $pair[1] "x $($m.Name)" } }
+    }
+    & $put $kf 'skills/auto-resume-global/DISTRIBUTION.md' 'not distributed'
+    foreach ($d in @($kf, $sf)) { Gx $d @('add', '-A') | Out-Null; Gx $d @('commit', '-q', '-m', 'init') | Out-Null }
+    $c1 = Compare-Distribution $kf 'HEAD' $sf 'HEAD'
+    Check 'そろっていれば、ずれなし' (@($c1 | Where-Object { -not $_.Same }).Count -eq 0 -and @($c1).Count -eq $distMap.Count + 1) ($c1 | Format-Table | Out-String)
+    & $put $kf 'skills/auto-resume-global/scripts/a.ps1' 'changed in kit'
+    & $put $sf 'packages/claude-skill-auto-resume-global/skills/auto-resume-global/extra.md' 'only in dist'
+    foreach ($d in @($kf, $sf)) { Gx $d @('add', '-A') | Out-Null; Gx $d @('commit', '-q', '-m', 'drift') | Out-Null }
+    $c2 = Compare-Distribution $kf 'HEAD' $sf 'HEAD'
+    $bad = @($c2 | Where-Object { -not $_.Same } | ForEach-Object Name)
+    Check 'キットだけ変えた・配布先にだけ足したものを見つける' ($bad.Count -eq 2 -and ($bad -contains 'auto-resume-global/scripts') -and ($bad -contains 'auto-resume-global の中身（名前）')) ($c2 | Format-Table | Out-String)
+
+    # 実物の配布先（-SkillsRepo か AUTO_LOOP_SKILLS_REPO を渡したときだけ。手元に取得済みの版で比べ、取得はしない）
+    if (-not $SkillsRepo) { $SkillsRepo = $env:AUTO_LOOP_SKILLS_REPO }
+    $kitDir = Split-Path -Parent $PSScriptRoot
+    if (-not $SkillsRepo) { Write-Output '  skip 実物の配布先（-SkillsRepo <yzkn/skills の clone> で比べる）' }
+    elseif (-not (Test-Path -LiteralPath (Join-Path $SkillsRepo '.git'))) { Write-Output "  skip 実物の配布先: git の clone ではない（$SkillsRepo）" }
+    elseif ((Gx $SkillsRepo @('rev-parse', '--verify', '-q', "$SkillsRef^{commit}")).Code -ne 0) { Write-Output "  skip 実物の配布先: $SkillsRef が無い（-SkillsRef で替える。先に git fetch しておく）" }
+    else {
+        $c3 = Compare-Distribution $kitDir $KitRef $SkillsRepo $SkillsRef
+        foreach ($x in $c3) { Check "配布先とそろっている: $($x.Name)（キット $KitRef / 配布先 $SkillsRef）" $x.Same "キット $($x.KitValue) / 配布先 $($x.DistValue)。キットを直したなら配布先に PR を出す（skills/auto-resume-global/DISTRIBUTION.md）" }
+    }
 }
 finally {
     $env:AUTO_LOOP_HOME = $null
