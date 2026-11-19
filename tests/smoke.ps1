@@ -5,6 +5,8 @@
 .DESCRIPTION
   ネットワーク・GitHub・利用者の ~/.claude には触れない（AUTO_LOOP_HOME を一時フォルダに向ける）。
   確かめること: 起票 → 一覧 → 担当の主張 → 二重の主張の拒否 → push の競り負け → 印 → 引き継ぎ → 主張の喪失の検出 → 解放と保管 → 同期の競合 → 着手前の確認
+              → 優先度（緊急）と一覧の順 → 自動起動の判断（kick.ps1 -DryRun。セッションは起こさない）→ 手が空いた時のタスクの定義 → 再開の指示の案内
+  自動起動・自動再開の場所は、環境変数（AUTO_LOOP_AUTO_RESUME_HOME・AUTO_LOOP_CLAUDE_PROJECTS）で一時フォルダに向ける。タスクスケジューラには触れない
 .EXAMPLE
   pwsh -NoProfile -File tests/smoke.ps1
   pwsh -NoProfile -File tests/smoke.ps1 -Keep    # 一時フォルダを残す
@@ -151,9 +153,86 @@ try {
     $p3 = Run 'a' 'preflight.ps1' @('-Project', 'demo')
     Check '変更の無い作業ツリーは 1 行にまとめる' ($p3.Text -match '変更の無い作業ツリーが 1 本' -and $p3.Text -notmatch 'target-wt2') $p3.Text
     Check 'ログに残る' ((Get-Content (Join-Path $root 'home-a/logs/auto-loop.log') -Raw) -match '\[preflight\].*NG=1')
+
+    Write-Output '9. 優先度（緊急）と一覧の順'
+    $u = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '低い', '-Slug', 'low', '-Priority', 'low', '-Source', 'idle')
+    $u2 = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '緊急の件', '-Slug', 'hot', '-Priority', 'urgent')
+    $hotId = (($u2.Text -split "`n")[0] -replace '^OK ', '').Trim()
+    $lowId = (($u.Text -split "`n")[0] -replace '^OK ', '').Trim()
+    $hotText = [IO.File]::ReadAllText((Join-Path $a "projects/demo/tasks/$hotId.md"), $utf8)
+    $lowText = [IO.File]::ReadAllText((Join-Path $a "projects/demo/tasks/$lowId.md"), $utf8)
+    Check 'urgent・idle で起票できる' ($u.Code -eq 0 -and $u2.Code -eq 0 -and $hotText -match '(?m)^priority: urgent$' -and $lowText -match '(?m)^source: idle$') "$($u.Text)`n$($u2.Text)"
+    $st4 = Run 'a' 'status.ps1' @('-Json', '-NoPull')
+    $readyIds = @(($st4.Text | ConvertFrom-Json).tasks | Where-Object { $_.status -eq 'ready' } | ForEach-Object { $_.id })
+    Check '一覧は、ready の中で緊急が先・低いものが後' ($readyIds.Count -ge 2 -and $readyIds[0] -eq $hotId -and $readyIds[-1] -eq $lowId) $st4.Text
+    $st5 = Run 'a' 'status.ps1' @('-NoPull')
+    Check '一覧に緊急の件数が出る' ($st5.Text -match '緊急（priority: urgent）: 1 件') $st5.Text
+
+    Write-Output '10. 自動起動の判断（起こさない）'
+    $arFake = Join-Path $root 'auto-resume-global'; $projFake = Join-Path $root 'claude-projects'
+    New-Item -ItemType Directory -Force $projFake | Out-Null
+    $env:AUTO_LOOP_AUTO_RESUME_HOME = $arFake; $env:AUTO_LOOP_CLAUDE_PROJECTS = $projFake
+    $k0 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check 'auto-resume-global が無ければ見送る' ($k0.Code -eq 0 -and $k0.Text -match 'SKIP auto-resume-global が導入されていない') $k0.Text
+    New-Item -ItemType Directory -Force $arFake | Out-Null
+    $oldAdd = 'auto-loop で管理している作業（~/.claude/auto-loop/state/active/ に印がある）なら、続ける前に /auto-loop resume を実行し、指令リポジトリの状態ファイルを読んで前提を確かめ直してください。'
+    [IO.File]::WriteAllText((Join-Path $arFake 'config.json'), (@{ resumePrompt = "続けてください。 $oldAdd"; rebootResumePrompt = '続けてください。' } | ConvertTo-Json), $utf8)
+    $k1 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '担当中・ready があれば work を起こす判断' ($k1.Text -match 'KICK work' -and $k1.Text -match 'doing=1' -and $k1.Text -match '緊急=1') $k1.Text
+    $k2 = Run 'a' 'kick.ps1' @('-SkipSystemChecks')
+    Check '有効にしていなければ起こさない' ($k2.Text -match 'SKIP kick.enabled が false' -and -not (Test-Path (Join-Path $root 'home-a/state/kick.json'))) $k2.Text
+    New-Item -ItemType Directory -Force (Join-Path $projFake 'p1') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $projFake 'p1/s.jsonl'), "{}`n", $utf8)
+    $k3 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check 'ほかのセッションが動いていれば見送る' ($k3.Text -match 'SKIP ほかのセッションが動いている') $k3.Text
+    Remove-Item (Join-Path $projFake 'p1/s.jsonl') -Force
+    [IO.File]::WriteAllText((Join-Path $arFake 'disabled'), '', $utf8)
+    $k4 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check 'auto-resume-global が停止中なら見送る' ($k4.Text -match 'SKIP auto-resume-global が停止中') $k4.Text
+    Remove-Item (Join-Path $arFake 'disabled') -Force
+    [IO.File]::WriteAllText((Join-Path $root 'home-a/state/kick.json'), (@{ lastLaunchedAt = (Get-Date).AddHours(-1).ToString('yyyy-MM-ddTHH:mm:sszzz'); lastKind = 'work'; lastIdleAt = '' } | ConvertTo-Json), $utf8)
+    $k5 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '前に起こしてから間が無ければ見送る' ($k5.Text -match 'SKIP 前に起こしてから') $k5.Text
+    Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
+    Check '見送りの理由がログに残る' ((Get-Content (Join-Path $root 'home-a/logs/auto-loop.log') -Raw) -match '\[kick\] 見送り')
+
+    Write-Output '11. 手が空いた時のタスク（リモートの無い指令リポジトリ）'
+    $c = Join-Path $root 'ctl-c'
+    Run 'c' 'new-control-repo.ps1' @('-Path', $c) | Out-Null
+    Run 'c' 'install.ps1' @('-NoCopy', '-AgentId', 'pc-c-claude', '-ControlRepoPath', $c) | Out-Null
+    $inboxC = Join-Path $c 'inbox.md'
+    $st6 = (Run 'c' 'status.ps1' @('-Json')).Text | ConvertFrom-Json
+    Check 'ひな形の例は止めてある（定義 0 件・受付 0 件）' (@($st6.idle).Count -eq 0 -and $st6.inbox -eq 0)
+    $k6 = Run 'c' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '通常のタスクも定義も無ければ idle を起こす判断' ($k6.Text -match 'KICK idle') $k6.Text
+    $t0 = [IO.File]::ReadAllText($inboxC, $utf8)
+    $t1 = $t0.Replace('### （停止）my-app: 小さなリファクタリング', '### my-app: 小さなリファクタリング')
+    [IO.File]::WriteAllText($inboxC, $t1, $utf8)
+    $st7 = (Run 'c' 'status.ps1' @('-Json')).Text | ConvertFrom-Json
+    $d0 = @($st7.idle)[0]
+    Check '定義を読む（案件・段階・間隔）' (@($st7.idle).Count -eq 1 -and $d0.project -eq 'my-app' -and $d0.stage -eq 'implement' -and $d0.intervalDays -eq 7 -and $d0.due -and $st7.inbox -eq 0) ($st7 | ConvertTo-Json -Depth 5)
+    $mark = "範囲: 1 回に PR / MR 1 本（1 つのモジュール・変更 200 行まで）`n最終実施:"
+    [IO.File]::WriteAllText($inboxC, $t1.Replace($mark, "$mark $((Get-Date).ToString('yyyy-MM-dd')) 済み"), $utf8)
+    $k7 = Run 'c' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '間隔の内に実施済みなら見送る' ($k7.Text -match 'SKIP やることが無い') $k7.Text
+    [IO.File]::WriteAllText($inboxC, $t1.Replace($mark, "$mark $((Get-Date).AddDays(-8).ToString('yyyy-MM-dd')) 済み"), $utf8)
+    $k8 = Run 'c' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '間隔を過ぎていれば idle を起こす判断' ($k8.Text -match 'KICK idle') $k8.Text
+    [IO.File]::AppendAllText($inboxC, "`n## demo: 急ぎ`n優先: 緊急`n本文`n", $utf8)
+    $k9 = Run 'c' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '受付に件があれば work（緊急を数える）' ($k9.Text -match 'KICK work' -and $k9.Text -match '受付=1 緊急=1') $k9.Text
+
+    Write-Output '12. 再開の指示の案内（auto-resume-global の設定は一時フォルダ）'
+    $l1 = Run 'c' 'install.ps1' @('-NoCopy', '-LinkAutoResume')
+    $arj = [IO.File]::ReadAllText((Join-Path $arFake 'config.json'), $utf8) | ConvertFrom-Json
+    $n1 = ([regex]::Matches($arj.resumePrompt, '/auto-loop resume')).Count
+    Check '前の版の案内を置き換え、無いほうには足す' ($arj.resumePrompt -match '/auto-loop next' -and $n1 -eq 1 -and $arj.rebootResumePrompt -match '/auto-loop next' -and (Get-ChildItem (Join-Path $root 'home-c/state') -Filter 'auto-resume-global.config.*.json').Count -eq 1) $l1.Text
+    $l2 = Run 'c' 'install.ps1' @('-NoCopy', '-LinkAutoResume')
+    Check '2 回目は何もしない' ($l2.Text -match '案内は入っている')
 }
 finally {
     $env:AUTO_LOOP_HOME = $null
+    $env:AUTO_LOOP_AUTO_RESUME_HOME = $null; $env:AUTO_LOOP_CLAUDE_PROJECTS = $null
     Write-Output ''
     Write-Output "結果: 成功 $script:pass / 失敗 $script:fail"
     if ($Keep -or $script:fail) { Write-Output "一時フォルダ: $root" }

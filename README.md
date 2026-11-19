@@ -27,7 +27,7 @@
 ```
 skills/auto-loop/                 スキル（そのまま ~/.claude/skills/ に置ける）
   SKILL.md                        入口。サブコマンドごとに references/ を読む
-  references/                     setup / status / intake / start / preflight / checkpoint / resume / delegate / finish
+  references/                     setup / status / intake / start / next / preflight / checkpoint / resume / delegate / finish
   scripts/                        PowerShell 7 のスクリプト（下の表）
   assets/control-repo/            指令リポジトリのひな形
 skills/auto-resume-global/        上限の解除時刻に PC を起こして再開するスキル（yzkn/skills からの複製。ここでは直さない）
@@ -47,6 +47,7 @@ tests/smoke.ps1                   スクリプトの通し試験（一時フォ�
 | `new-task.ps1` | タスクファイルの作成 |
 | `claim.ps1` | 担当の主張・印・解放・引き継ぎ |
 | `sync.ps1` | 指令リポジトリの同期（コミット → 取り込み → 送信） |
+| `kick.ps1` / `kick-session.ps1` | 起動時（ログオン時）・スリープ解除時に、やることがあれば新しいウィンドウでセッションを起こす（`install.ps1 -EnableKick` で有効にしたときだけ。Windows 専用。判断だけを見るのは `kick.ps1 -DryRun`） |
 
 ## 始め方
 
@@ -64,6 +65,8 @@ pwsh -NoProfile -File skills/auto-loop/scripts/install.ps1 -AgentId pc1-claude-m
 # 4. 確かめる
 pwsh -NoProfile -File $HOME\.claude\skills\auto-loop\scripts\preflight.ps1
 ```
+
+着手の順（着手のたびの優先度の判定・緊急・PC 1 台 1 リポジトリ・手が空いたときの作業）は、指令リポジトリの `AGENTS.md`「7. 着手の順」と、手順 `/auto-loop next` にあります。
 
 上限で止まっても自動で再開させたいときは、`auto-resume-global` も導入します（[skills/auto-resume-global/README.md](skills/auto-resume-global/README.md) の「導入」。パスは `skills/auto-resume-global/` に読み替える）。
 
