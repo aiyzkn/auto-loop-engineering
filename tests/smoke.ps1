@@ -221,6 +221,12 @@ try {
     [IO.File]::AppendAllText($inboxC, "`n## demo: 急ぎ`n優先: 緊急`n本文`n", $utf8)
     $k9 = Run 'c' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
     Check '受付に件があれば work（緊急を数える）' ($k9.Text -match 'KICK work' -and $k9.Text -match '受付=1 緊急=1') $k9.Text
+    # 冒頭の案内（「この下に足してください」）の直後、「手が空いた時」の節より上に書いた依頼も数える
+    $t2 = [IO.File]::ReadAllText($inboxC, $utf8)
+    $t3 = $t2.Replace("`n## 手が空いた時に実行するタスク", "`n## demo: 冒頭に書いた依頼`n優先: 高`n本文`n`n## demo: 冒頭に書いた急ぎ`n優先: 緊急`n本文`n`n## 手が空いた時に実行するタスク")
+    [IO.File]::WriteAllText($inboxC, $t3, $utf8)
+    $st8 = (Run 'c' 'status.ps1' @('-Json')).Text | ConvertFrom-Json
+    Check '目印より上に書いた依頼も数える（例の囲みと定義は数えない）' ($st8.inbox -eq 3 -and $st8.inboxUrgent -eq 2 -and @($st8.idle).Count -eq 1) ($st8 | ConvertTo-Json -Depth 5)
 
     Write-Output '12. 再開の指示の案内（auto-resume-global の設定は一時フォルダ）'
     $l1 = Run 'c' 'install.ps1' @('-NoCopy', '-LinkAutoResume')
