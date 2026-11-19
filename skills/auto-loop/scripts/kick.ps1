@@ -17,6 +17,8 @@
   起こしたセッションは /auto-loop next を実行する（指令リポジトリの AGENTS.md「7. 着手の順」）。
   あわせて、kick.weeklyAtReset が true なら、週の上限の解除時刻（記録の resetsAt か kick.weeklyResetAt）を調べ、
   タスク AutoLoopKickWeekly の時刻が違っていれば登録し直す（1 の前に行う。DryRun では表示だけ）。
+  判断のたびに、PC の状況を指令リポジトリの state/pcs/<agentId>.json に書く（kick.enabled のときだけ。中身が変わったときか
+  kick.statusEveryMinutes 分ごと。このファイルだけをコミットし、ほかの変更が無いときだけ push する。ダッシュボードが読む）。
   終了コード: 0 = 起こした・見送った / 1 = 設定が読めない
 .PARAMETER Trigger
   起動のきっかけ（ログに書く）。weekly（週の解除時刻）のときは 6 の間隔を見ない
@@ -48,9 +50,22 @@ $runFile = Join-Path $stateDir 'kick-running.json'
 $arHome = if ($env:AUTO_LOOP_AUTO_RESUME_HOME) { $env:AUTO_LOOP_AUTO_RESUME_HOME } else { Join-Path $HOME '.claude/auto-resume-global' }
 $projects = if ($env:AUTO_LOOP_CLAUDE_PROJECTS) { $env:AUTO_LOOP_CLAUDE_PROJECTS } else { Join-Path $HOME '.claude/projects' }
 
+# PC の状況（指令リポジトリの state/pcs/<ID>.json）。kick.enabled のときだけ、DryRun では書かない
+$script:pcStatus = @{ trigger = $(if ($Trigger) { $Trigger } else { 'logon-wake-interval' }); intervalMinutes = [int]$kick.intervalMinutes }
+function Save-PcStatus([string]$Decision, [string]$Reason) {
+    if ($DryRun -or -not $kick.enabled) { return }
+    # 手元のパス・フォルダ名（利用者名を含む）は書かない
+    $public = $Reason -replace '[A-Za-z]:[\\/][^\s、）)]*', '<パス>' -replace '\b[A-Za-z]--[^\s、）)]+', '<プロジェクト>'
+    $script:pcStatus.decision = $Decision
+    $script:pcStatus.reason = $public
+    $script:pcStatus.kickEnabled = [bool]$kick.enabled
+    $r = Write-PcStatus -Config $cfg -Status $script:pcStatus -EveryMinutes ([double]$kick.statusEveryMinutes)
+    if ($r -like 'failed*' -or $r -like 'written-local*') { Write-LoopLog 'kick' "PC の状況: $r" }
+}
 function Skip([string]$Reason) {
     Write-LoopLog 'kick' "見送り$(if ($DryRun) { '（DryRun）' }): $Reason"
     Write-Output "SKIP $Reason"
+    Save-PcStatus 'skip' $Reason
     exit 0
 }
 # 印の pid のプロセスが、印を書いた時刻より前から動いているか（pid の使い回しを、動いていると取り違えない）
@@ -72,6 +87,8 @@ if ($kick.weeklyAtReset -and ($kick.enabled -or $DryRun)) {
         if ($wr.ResetAt) {
             $at = Get-NextWeeklySlot -ResetAt $wr.ResetAt
             $atIso = $at.ToString('yyyy-MM-ddTHH:mm:sszzz')
+            $script:pcStatus.weeklyResetAt = $wr.ResetAt.ToString('yyyy-MM-ddTHH:mm:sszzz')
+            $script:pcStatus.weeklyNextAt = $atIso
             $registered = $false
             if ($IsWindows -and -not $SkipSystemChecks) { $registered = [bool](Get-ScheduledTask -TaskName 'AutoLoopKickWeekly' -ErrorAction SilentlyContinue) }
             # 曜日・時刻（7 日刻み）が同じなら登録し直さない
@@ -122,6 +139,7 @@ if (-not $SkipSystemChecks) {
     if ($IsWindows) {
         try {
             $info = Get-ScheduledTaskInfo -TaskName 'ClaudeAutoResumeGlobal-Wake' -ErrorAction Stop
+            if ($info.NextRunTime) { $script:pcStatus.nextWakeAt = $info.NextRunTime.ToString('yyyy-MM-ddTHH:mm:sszzz') }
             if ($info.NextRunTime -and $info.NextRunTime -gt (Get-Date)) { Skip "上限の解除待ち（復帰タスクが $($info.NextRunTime.ToString('MM/dd HH:mm')) に登録されている）" }
         }
         catch { }
@@ -136,6 +154,9 @@ if ($kick.busyMinutes -gt 0) {
     if (-not $SkipSystemChecks) { $anyClaude = [bool](Get-Process -Name 'claude' -ErrorAction SilentlyContinue | Select-Object -First 1) }
     if ($anyClaude) {
         $busy = Get-BusySessions -ProjectsDir $projects -BusyMinutes ([double]$kick.busyMinutes)
+        $counts = [ordered]@{ working = $busy.Working.Count; 'waiting-input' = 0; limit = 0; empty = 0; stale = 0 }
+        foreach ($g in @($busy.Idle | Group-Object State)) { $counts[$g.Name] = $g.Count }
+        $script:pcStatus.sessions = $counts
         if ($busy.Working.Count -gt 0) {
             $w = $busy.Working[0]
             Skip "ほかのセッションが動いている（$($w.Project) の $($w.SessionId.Substring(0, [math]::Min(8, $w.SessionId.Length)))、$($kick.busyMinutes) 分の内に作業の記録がある。ほか $($busy.Working.Count - 1) 件）"
@@ -155,6 +176,7 @@ if (Test-Path -LiteralPath $histFile) {
     }
     catch { }
 }
+$script:pcStatus.lastLaunchedAt = $hist.lastLaunchedAt; $script:pcStatus.lastKind = $hist.lastKind
 $since = Get-HoursSince $hist.lastLaunchedAt
 if (-not $Force -and $Trigger -ne 'weekly' -and $null -ne $since -and $since -lt [double]$kick.minIntervalHours) {
     Skip ("前に起こしてから {0:0.0} 時間（kick.minIntervalHours = {1}）" -f $since, $kick.minIntervalHours)
@@ -216,6 +238,7 @@ try {
 catch {
     Write-LoopLog 'kick' "起こせなかった: $($_.Exception.Message)"
     Write-Output "NG 起こせなかった: $($_.Exception.Message)"
+    Save-PcStatus 'error' "起こせなかった: $($_.Exception.Message)"
     exit 0
 }
 $now = Get-NowIso
@@ -225,4 +248,6 @@ if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -For
 [IO.File]::WriteAllText($histFile, ($hist | ConvertTo-Json), $utf8)
 Write-LoopLog 'kick' "起こした: $kind session=$sessionId（$summary）$pullNote"
 Write-Output "KICK ${kind}: session=$sessionId（$summary）$pullNote"
+$script:pcStatus.lastLaunchedAt = $now; $script:pcStatus.lastKind = $kind
+Save-PcStatus "kick-$kind" "起こした（$summary）"
 exit 0

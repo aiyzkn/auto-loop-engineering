@@ -251,6 +251,42 @@ try {
     Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
     Remove-Item $wFile -Force
 
+    Write-Output '10c. PC の状況（指令リポジトリの state/pcs/<ID>.json）'
+    Run 'a' 'sync.ps1' @('-Message', '前の節の起票を送る') | Out-Null    # 作業ツリーをきれいにしておく（ほかの変更があると push しないため）
+    $cfgK = Get-Content $cfgPath -Raw | ConvertFrom-Json
+    $cfgK | Add-Member -NotePropertyName kick -NotePropertyValue ([pscustomobject]@{ enabled = $true; statusEveryMinutes = 60 }) -Force
+    [IO.File]::WriteAllText($cfgPath, ($cfgK | ConvertTo-Json -Depth 5), $utf8)
+    [IO.File]::WriteAllText($sFile, "$recUser`n$recTool`n", $utf8)      # 手を動かしているセッション → 見送り（ウィンドウは開かない）
+    $before = (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim()
+    $ks1 = Run 'a' 'kick.ps1' @('-SkipSystemChecks')
+    $pcFile = Join-Path $a 'state/pcs/pc-a-claude.json'
+    $pc = if (Test-Path $pcFile) { Get-Content $pcFile -Raw | ConvertFrom-Json } else { $null }
+    Check '見送りでも状況を書く（判断・理由・セッションの数）' ($ks1.Text -match 'SKIP ほかのセッション' -and $pc -and $pc.decision -eq 'skip' -and $pc.sessions.working -eq 1 -and $pc.agentId -eq 'pc-a-claude' -and $pc.kickEnabled) $ks1.Text
+    $pcRaw = if (Test-Path $pcFile) { Get-Content $pcFile -Raw } else { '' }
+    Check '状況にパスを書かない' ($pcRaw -and $pcRaw -notmatch [regex]::Escape($root) -and $pcRaw -notmatch '[A-Za-z]:\\\\')
+    Check '状況のファイルだけをコミットして push する' ((Gx $a @('log', '-1', '--format=%s')).Text.Trim() -eq '[pc-a-claude] pc-status' -and (Gx $a @('ls-remote', 'origin', 'main')).Text -match (Gx $a @('rev-parse', 'HEAD')).Text.Trim())
+    $mid = (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim()
+    $ks2 = Run 'a' 'kick.ps1' @('-SkipSystemChecks')
+    Check '中身が同じなら書き直さない（コミットが増えない）' ((Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim() -eq $mid -and [int]$mid -eq [int]$before + 1) "$before → $mid → $((Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim())"
+    # ほかの変更（別のセッションの書きかけ）があれば、状況はコミットしても push しない。書きかけはコミットに入れない
+    [IO.File]::WriteAllText((Join-Path $a 'half-edit.md'), "書きかけ`n", $utf8)
+    [IO.File]::WriteAllText($sFile, "$recUser`n$recTool`n$recDone`n", $utf8)   # 入力待ち → 中身が変わる（見送りの理由も変わる）
+    $ks3 = Run 'a' 'kick.ps1' @('-SkipSystemChecks', '-DryRun')
+    Check 'DryRun では状況を書かない' ((Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim() -eq $mid)
+    $cfgK.kick | Add-Member -NotePropertyName minIntervalHours -NotePropertyValue 0 -Force
+    [IO.File]::WriteAllText((Join-Path $root 'home-a/state/kick.json'), (@{ lastLaunchedAt = (Get-Date).AddMinutes(-5).ToString('yyyy-MM-ddTHH:mm:sszzz'); lastKind = 'work'; lastIdleAt = '' } | ConvertTo-Json), $utf8)
+    $cfgK.kick.minIntervalHours = 1
+    [IO.File]::WriteAllText($cfgPath, ($cfgK | ConvertTo-Json -Depth 5), $utf8)
+    $ks4 = Run 'a' 'kick.ps1' @('-SkipSystemChecks')     # 間隔で見送り（ウィンドウは開かない）
+    $tracked = (Gx $a @('ls-files', 'half-edit.md')).Text.Trim()
+    Check '書きかけがあれば、状況はコミットだけして push しない（書きかけは入れない）' ($ks4.Text -match 'SKIP 前に起こしてから' -and -not $tracked -and (Gx $a @('log', '-1', '--format=%s')).Text.Trim() -eq '[pc-a-claude] pc-status' -and (Gx $a @('ls-remote', 'origin', 'main')).Text -notmatch (Gx $a @('rev-parse', 'HEAD')).Text.Trim()) $ks4.Text
+    Remove-Item (Join-Path $a 'half-edit.md') -Force
+    Gx $a @('push', '-q', 'origin', 'HEAD:main') | Out-Null
+    Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
+    $cfgK.kick.enabled = $false
+    [IO.File]::WriteAllText($cfgPath, ($cfgK | ConvertTo-Json -Depth 5), $utf8)
+    Remove-Item $sFile -Force
+
     Write-Output '11. 手が空いた時のタスク（リモートの無い指令リポジトリ）'
     $c = Join-Path $root 'ctl-c'
     Run 'c' 'new-control-repo.ps1' @('-Path', $c) | Out-Null

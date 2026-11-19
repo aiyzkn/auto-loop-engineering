@@ -285,6 +285,7 @@ function Get-KickConfig {
         intervalMinutes      = 0        # この分ごとにも kick.ps1 を起動する（0 なら使わない。15・30 など）。起こすかどうかは同じ判断
         weeklyAtReset        = $true    # 週の上限の解除時刻（の 6 分後）に、毎週 PC を起こして kick.ps1 を起動する（タスク AutoLoopKickWeekly）
         weeklyResetAt        = ''       # 週の解除の曜日・時刻を手で決める（例 'Thu 08:00'）。空なら、セッションの記録の週の上限の resetsAt から取る
+        statusEveryMinutes   = 60       # PC の状況（指令リポジトリの state/pcs/<ID>.json）を、中身が変わらなくてもこの分ごとに書き直す（0 なら書かない）
         permissionMode       = 'auto'   # 起こすセッションの権限モード
         remoteControl        = $true    # --remote-control つきで起こす
         prompt               = ''       # 最初に送る指示。空なら既定（/auto-loop next）
@@ -546,6 +547,58 @@ function Resolve-WeeklyReset {
         Write-LoopText $file (([pscustomobject]$st) | ConvertTo-Json)
     }
     return [pscustomobject]@{ ResetAt = $reset; Source = $source; TaskAt = $st.taskAt; StateFile = $file }
+}
+
+# PC の状況を、指令リポジトリの state/pcs/<agentId>.json に書く（ダッシュボードが読む）。
+# 中身（updatedAt を除く）が前と同じで、前に書いてから EveryMinutes 分たっていなければ、何もしない。
+# このファイルだけをコミットし（ほかのセッションの書きかけを巻き込まない）、作業ツリーにほかの変更が無いときだけ push する。
+# 認証情報・パス・セッションの中身は書かない。戻り値: 'written-pushed' / 'written-local' / 'unchanged' / 'off' / 'failed: …'
+function Write-PcStatus {
+    param($Config, [hashtable]$Status, [double]$EveryMinutes = 60)
+    if ($EveryMinutes -le 0) { return 'off' }
+    $repo = [string]$Config.controlRepoPath
+    if (-not $repo -or -not (Test-Path -LiteralPath $repo)) { return 'failed: 指令リポジトリが無い' }
+    $id = [string]$Config.agentId
+    $rel = "state/pcs/$id.json"
+    $file = Join-Path $repo $rel
+    $now = Get-NowIso
+    $body = [ordered]@{ agentId = $id; pc = [Environment]::MachineName; updatedAt = $now }
+    foreach ($k in ($Status.Keys | Sort-Object)) { $body[$k] = $Status[$k] }
+    # 比べるときはキーを並べ替える（PowerShell 7.1 の ConvertFrom-Json -AsHashtable は順序を保たない）
+    $canon = $null
+    $canon = {
+        param($v)
+        if ($v -is [System.Collections.IDictionary]) {
+            $o = [ordered]@{}
+            foreach ($k in (@($v.Keys) | Sort-Object)) { if ($k -ne 'updatedAt') { $o[$k] = & $canon $v[$k] } }
+            return $o
+        }
+        if ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) { return , @($v | ForEach-Object { & $canon $_ }) }
+        return $v
+    }
+    $prevAt = $null; $same = $false
+    if (Test-Path -LiteralPath $file) {
+        try {
+            $old = [IO.File]::ReadAllText($file, $script:Utf8NoBom) | ConvertFrom-Json -AsHashtable
+            $prevAt = [datetimeoffset]::Parse([string]$old['updatedAt'])
+            $newH = ([pscustomobject]$body | ConvertTo-Json -Depth 5) | ConvertFrom-Json -AsHashtable   # 型をそろえる（JSON を往復）
+            $same = (((& $canon $old) | ConvertTo-Json -Depth 6 -Compress) -eq ((& $canon $newH) | ConvertTo-Json -Depth 6 -Compress))
+        }
+        catch { }
+    }
+    if ($same -and $prevAt -and ([datetimeoffset]::Now - $prevAt).TotalMinutes -lt $EveryMinutes) { return 'unchanged' }
+    try {
+        New-Item -ItemType Directory -Force (Split-Path -Parent $file) | Out-Null
+        Write-LoopText $file ((([pscustomobject]$body) | ConvertTo-Json -Depth 5) + "`n")
+        Invoke-Git $repo @('add', '--', $rel) | Out-Null
+        $c = Invoke-Git $repo @('commit', '-m', "[$id] pc-status", '--', $rel)
+        if ($c.Code -ne 0) { return "failed: commit $($c.Text.Trim())" }
+        # ほかの変更（別のセッションの書きかけ）があれば push しない。次の同期（sync.ps1・claim.ps1）で一緒に送られる
+        if ((Invoke-Git $repo @('status', '--porcelain')).Text.Trim()) { return 'written-local' }
+        $r = Sync-ControlRepo $Config -Message "[$id] pc-status"
+        if ($r.Ok) { return 'written-pushed' } else { return "written-local（push できなかった: $($r.Reason)）" }
+    }
+    catch { return "failed: $($_.Exception.Message)" }
 }
 
 # 週次のタスクの登録時刻を state/kick-weekly.json に書く
