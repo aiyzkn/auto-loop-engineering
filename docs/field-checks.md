@@ -13,6 +13,8 @@
 | 2026-11-15 | Git Credential Manager に github.com のアカウントが 2 つあると、入力を無効にした git が止まる | 指令リポジトリの同期が `Cannot prompt because user interactivity has been disabled` で失敗。`GCM_TRACE` で「Multiple accounts available - prompting user to select one」を確認。clone ごとに `credential.https://github.com.username` を固定して直し、`preflight.ps1` と `sync.ps1` が直し方を示すようにした |
 | 2026-11-15 | GitLab の案件（vanilla）の `preflight.ps1` | `OK 認証 gitlab.com: glab: yzkn`、`OK push 先 … access_level=50`、`WARN ローカルの main は origin/main より 708 コミット遅れ`、過去のセッションの作業ツリー 39 本のうち未コミットの変更がある 1 本の検出 |
 | 2026-11-19 | 受付の冒頭の案内（「この下に足してください」）に従って書いた依頼が、数えられていなかった | 利用者が 11/17 に GitHub の画面で `inbox.md` に 3 件書いたが、`status.ps1` は `inbox: 0`。件数は末尾の目印より下だけを数えていた。「手が空いた時に実行するタスク」の節を目印の上に足したとき（着手の順の追加）に、案内の位置と数える範囲がずれた。目印の位置に頼らず、`##` 見出しを数えるように直した（書き方の例の囲みと「手が空いた時」の節は除く）。`tests/smoke.ps1` に冒頭に書いた場合の項目を足した |
+| 2026-11-19 | 自動起動のタスクの登録: `install.ps1 -EnableKick -KickIntervalMinutes 30` で、タスクスケジューラが `AutoLoopKick`（Logon・Event・Time、繰り返し `PT30M`）と `AutoLoopKickWeekly`（Weekly、木 08:06、`WakeToRun=True`）の XML を受け付けた | `Get-ScheduledTask` / `Get-ScheduledTaskInfo`（A-MSI、Windows 11）。`Start-ScheduledTask AutoLoopKick` で起動して結果 0、ほかのセッションが動いているので見送り、PC の状況（`state/pcs/<ID>.json`）を書いて push した |
+| 2026-11-19 | 30 分ごとの起動が時刻どおりに動き、入力待ちのセッションを数えずに新しいセッションを起こし、起こされたセッションが `/auto-loop next` で優先度の高いタスクに着手した | `logs/auto-loop.log`: `19:50:06 [kick] 起こした: work … ready=4 … 手が止まっているセッション 1 件は数えない（waiting-input=1）`（利用者と話していたセッションが返答のあと入力待ちだった）→ `19:50:07 セッションを起動` → `19:50:50 [claim] claim 20261119-dashboard-rich-ui`（ready 4 件のうち、唯一の優先 high） |
 
 ## まだ確かめていないこと
 
@@ -26,9 +28,9 @@
 | Claude Code 以外のエージェント（Copilot など）が `AGENTS.md` の手順で担当を主張する | 実際に 1 件通す |
 | 利用者が GitHub の画面でタスクファイルに回答を書き、エージェントが次の同期で読む | `waiting` のタスクで試す。同じ箇所を同時に書いたときの競合の直し方も確かめる |
 | macOS / Linux の `pwsh` での動作 | `tests/smoke.ps1` を流す |
-| 自動起動（`AutoLoopKick`）: 実際のログオン・スリープ復帰のあとに `kick.ps1` が動き、新しいウィンドウでセッションが起きて `/auto-loop next` を実行する | `install.ps1 -EnableKick` のあと、ログオン・スリープ復帰をまたぐ。`logs/auto-loop.log` の `[kick]` の行（起こした・見送りの理由）と、タスクファイルのログの `next:` の行を照らす |
-| 自動起動: タスク `AutoLoopKick` の間隔の繰り返し（`-KickIntervalMinutes 15`）と、`AutoLoopKickWeekly`（週の解除時刻の 6 分後、PC を起こす）の登録が、タスクスケジューラに受け付けられ、その時刻に動く | `install.ps1 -NoCopy -EnableKick -KickIntervalMinutes 15` のあと、`Get-ScheduledTask AutoLoopKick, AutoLoopKickWeekly | Get-ScheduledTaskInfo` の `NextRunTime`。次の週の解除時刻のあとに `logs/auto-loop.log` の `起動のきっかけ: weekly` の行 |
-| 自動起動: 入力待ちのウィンドウが開いたままでも起こし、手を動かしているセッションがあれば見送る（`Get-BusySessions`）。権限の確認待ちや、15 分を超えるツールの実行を、止まっているとみなしてしまわないか | 入力待ちのウィンドウを残して `kick.ps1 -DryRun` を実行し、`手が止まっているセッション … waiting-input=1` が出ること。長い試験を流している間に `-DryRun` して、`SKIP ほかのセッションが動いている` になるかを見る |
+| 自動起動（`AutoLoopKick`）: 実際のログオン・スリープ復帰のあとに `kick.ps1` が動き、新しいウィンドウでセッションが起きて `/auto-loop next` を実行する（間隔の起動では確かめた。ログオン・スリープ復帰の契機はまだ） | `install.ps1 -EnableKick` のあと、ログオン・スリープ復帰をまたぐ。`logs/auto-loop.log` の `[kick]` の行（起こした・見送りの理由）と、タスクファイルのログの `next:` の行を照らす |
+| 自動起動: `AutoLoopKickWeekly`（週の解除時刻の 6 分後）が、その時刻に PC を起こして動く（登録と、間隔の起動は確かめた） | 次の週の解除時刻（A-MSI では 11/26 08:06）のあとに、`logs/auto-loop.log` の `起動のきっかけ: weekly` の行。スリープ中なら、電源のスリープ解除タイマーが有効か |
+| 自動起動: 権限の確認待ちや、15 分を超えるツールの実行を、止まっているとみなしてしまわないか（入力待ちを数えないこと・手を動かしているセッションで見送ることは確かめた） | 長い試験を流している間に `kick.ps1 -DryRun` して、`SKIP ほかのセッションが動いている` になるかを見る。権限の確認で止まったまま 15 分を過ぎたときの判断（`stale`）も見る |
 | 自動起動: 記録が書かれなくなったセッションを終わらせる見張り（`idleCloseMinutes`）。長い処理（試験など）の途中で終わらせてしまわないか | 起こされたセッションを放置し、`[kick] セッションが終わった … idle-close` の行と、そのときの作業の状態を確かめる |
 | 自動起動: 上限の解除待ちのとき（復帰タスクが登録されている）に見送る | 上限で止まった状態で `kick.ps1 -DryRun` を実行し、`SKIP 上限の解除待ち` が出ること |
 | 手が空いたときの作業を 1 件、定義から起票して行い、`最終実施:` が書き換わる | 通常のタスクが無い状態で `/auto-loop next` を実行する |
