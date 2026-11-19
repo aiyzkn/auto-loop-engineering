@@ -11,11 +11,15 @@
     4. 上限の解除待ちでない（復帰タスク ClaudeAutoResumeGlobal-Wake が先の時刻に登録されていない）
     5. この PC で、手を動かしているセッションが無い。手が止まっているもの（claude が起動していない / 起動したが指示が無い /
        利用者の入力待ち / 上限の解除待ち / kick.busyMinutes 分より長く書かれていない）は数えない（Get-BusySessions）
-    6. 前に起こしてから kick.minIntervalHours 時間が過ぎている
+    6. 前に起こしてから kick.minIntervalHours 時間が過ぎている（週の解除時刻の起動 -Trigger weekly では見ない）
     7. やることがある: 自分が担当の doing / 回答の届いた waiting・blocked / 自分に合う ready / 受付の未整理（work）。
        どれも無ければ、手が空いたときの作業（idle。kick.idle が true で、前の idle から kick.idleMinIntervalHours 時間が過ぎているとき）
   起こしたセッションは /auto-loop next を実行する（指令リポジトリの AGENTS.md「7. 着手の順」）。
+  あわせて、kick.weeklyAtReset が true なら、週の上限の解除時刻（記録の resetsAt か kick.weeklyResetAt）を調べ、
+  タスク AutoLoopKickWeekly の時刻が違っていれば登録し直す（1 の前に行う。DryRun では表示だけ）。
   終了コード: 0 = 起こした・見送った / 1 = 設定が読めない
+.PARAMETER Trigger
+  起動のきっかけ（ログに書く）。weekly（週の解除時刻）のときは 6 の間隔を見ない
 .PARAMETER DryRun
   判断だけを表示する（起こさない・記録を書かない・kick.enabled を見ない）
 .PARAMETER Force
@@ -28,7 +32,8 @@
 param(
     [switch]$DryRun,
     [switch]$Force,
-    [switch]$SkipSystemChecks
+    [switch]$SkipSystemChecks,
+    [ValidateSet('', 'weekly')][string]$Trigger = ''
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'lib/AutoLoop.psm1') -Force
@@ -60,7 +65,34 @@ function Get-HoursSince([string]$Iso) {
     try { return ([datetimeoffset]::Now - [datetimeoffset]::Parse($Iso)).TotalHours } catch { return $null }
 }
 
+# 0. 週の解除時刻のタスクを合わせる（有効なときだけ。失敗しても判断は続ける）
+if ($kick.weeklyAtReset -and ($kick.enabled -or $DryRun)) {
+    try {
+        $wr = Resolve-WeeklyReset -Kick $kick -ProjectsDir $projects -NoSave:$DryRun
+        if ($wr.ResetAt) {
+            $at = Get-NextWeeklySlot -ResetAt $wr.ResetAt
+            $atIso = $at.ToString('yyyy-MM-ddTHH:mm:sszzz')
+            $registered = $false
+            if ($IsWindows -and -not $SkipSystemChecks) { $registered = [bool](Get-ScheduledTask -TaskName 'AutoLoopKickWeekly' -ErrorAction SilentlyContinue) }
+            # 曜日・時刻（7 日刻み）が同じなら登録し直さない
+            $same = $false
+            if ($wr.TaskAt) { try { $same = (([math]::Round(([datetimeoffset]::Parse($wr.TaskAt).LocalDateTime - $at).TotalMinutes) % 10080) -eq 0) } catch { } }
+            if ($DryRun) { Write-Output "INFO 週の解除時刻: $($wr.ResetAt.ToString('ddd MM/dd HH:mm'))（$($wr.Source)）→ 次の起動 $($at.ToString('ddd MM/dd HH:mm'))$(if ($registered -and $same) { '（登録済み）' } else { '（登録し直す対象）' })" }
+            elseif ($IsWindows -and -not $SkipSystemChecks -and -not ($registered -and $same)) {
+                $shellPath = (Get-Process -Id $PID).Path
+                $xml = New-KickTaskXml -Kind weekly -KickScript $PSCommandPath -Shell $shellPath -User "$env:USERDOMAIN\$env:USERNAME" -WeeklyAt $at
+                Register-ScheduledTask -TaskName 'AutoLoopKickWeekly' -Xml $xml -Force | Out-Null
+                Set-WeeklyTaskAt $atIso
+                Write-LoopLog 'kick' "週の解除時刻のタスク AutoLoopKickWeekly を登録した（毎週 $($at.DayOfWeek) $($at.ToString('HH:mm'))、次 $($at.ToString('MM/dd HH:mm'))。$($wr.Source)）"
+            }
+        }
+        elseif ($DryRun) { Write-Output 'INFO 週の解除時刻: 分からない（週の上限の記録が無い。kick.weeklyResetAt で手で決められる）' }
+    }
+    catch { Write-LoopLog 'kick' "週の解除時刻のタスクを合わせられなかった: $($_.Exception.Message)" }
+}
+
 # 1. 有効か
+if ($Trigger) { Write-LoopLog 'kick' "起動のきっかけ: $Trigger" }
 if (-not $kick.enabled -and -not $DryRun -and -not $Force) { Skip 'kick.enabled が false（install.ps1 -EnableKick で有効にする）' }
 
 # 2. auto-resume-global
@@ -124,7 +156,7 @@ if (Test-Path -LiteralPath $histFile) {
     catch { }
 }
 $since = Get-HoursSince $hist.lastLaunchedAt
-if (-not $Force -and $null -ne $since -and $since -lt [double]$kick.minIntervalHours) {
+if (-not $Force -and $Trigger -ne 'weekly' -and $null -ne $since -and $since -lt [double]$kick.minIntervalHours) {
     Skip ("前に起こしてから {0:0.0} 時間（kick.minIntervalHours = {1}）" -f $since, $kick.minIntervalHours)
 }
 

@@ -223,6 +223,34 @@ try {
     Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
     Check '見送りの理由がログに残る' ((Get-Content (Join-Path $root 'home-a/logs/auto-loop.log') -Raw) -match '\[kick\] 見送り')
 
+    Write-Output '10b. 起動のきっかけ（週の解除時刻・一定間隔。タスクスケジューラには登録しない）'
+    Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
+    $kw0 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '週の上限の記録が無ければ、解除時刻は分からない' ($kw0.Text -match 'INFO 週の解除時刻: 分からない') $kw0.Text
+    $resetUnix = [DateTimeOffset]::new((Get-Date).Date.AddDays(-2).AddHours(8)).ToUnixTimeSeconds()   # 2 日前の 08:00
+    $recWeek = '{"parentUuid":"e","type":"assistant","error":"rate_limit","apiErrorParams":{"rate_limit_info":{"status":"rejected","resetsAt":' + $resetUnix + ',"rateLimitType":"seven_day"}},"message":{"role":"assistant","content":[{"type":"text","text":"limit"}]}}'
+    $wFile = Join-Path $projFake 'p1/w.jsonl'
+    [IO.File]::WriteAllText($wFile, "$recUser`n$recWeek`n", $utf8)
+    $expReset = [DateTimeOffset]::FromUnixTimeSeconds($resetUnix).LocalDateTime
+    $found = Find-WeeklyResetFromTranscripts -ProjectsDir $projFake -Since (Get-Date).AddDays(-1)
+    Check '記録から週の上限の解除時刻を読む' ($found -eq $expReset) "$found / $expReset"
+    $slot = Get-NextWeeklySlot -ResetAt $expReset -Now (Get-Date)
+    Check '次の起動は解除時刻 + 6 分の 7 日刻みで、これから 7 日の内' ($slot -gt (Get-Date) -and $slot -le (Get-Date).AddDays(7) -and $slot.DayOfWeek -eq $expReset.DayOfWeek -and $slot.ToString('HH:mm') -eq $expReset.AddMinutes(6).ToString('HH:mm')) "$slot"
+    $kw1 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check 'DryRun で週の解除時刻と次の起動を表示する（状態は書かない）' ($kw1.Text -match 'INFO 週の解除時刻: .*セッションの記録' -and -not (Test-Path (Join-Path $root 'home-a/state/kick-weekly.json'))) $kw1.Text
+    $man = ConvertFrom-WeeklyText 'Thu 08:00'
+    Check '手で書いた曜日・時刻を読む（Thu 08:00・木 8:00）' ($man.DayOfWeek -eq 'Thursday' -and $man.ToString('HH:mm') -eq '08:00' -and $man -le (Get-Date) -and (ConvertFrom-WeeklyText '木 8:00') -eq $man -and -not (ConvertFrom-WeeklyText 'あとで'))
+    $xm = [xml](New-KickTaskXml -Kind main -KickScript 'C:\x y\kick.ps1' -Shell 'C:\pwsh.exe' -User 'PC\me' -IntervalMinutes 15)
+    $xw = [xml](New-KickTaskXml -Kind weekly -KickScript 'C:\x y\kick.ps1' -Shell 'C:\pwsh.exe' -User 'PC\me' -WeeklyAt $slot)
+    Check 'タスクの XML: 間隔の繰り返し（PT15M）と、週次は PC を起こして -Trigger weekly' ($xm.Task.Triggers.TimeTrigger.Repetition.Interval -eq 'PT15M' -and $xm.Task.Settings.WakeToRun -eq 'false' -and $xw.Task.Settings.WakeToRun -eq 'true' -and $xw.Task.Triggers.CalendarTrigger.ScheduleByWeek.WeeksInterval -eq '1' -and $xw.Task.Actions.Exec.Arguments -match '-Trigger weekly$')
+    $xm0 = [xml](New-KickTaskXml -Kind main -KickScript 'C:\k.ps1' -Shell 'C:\pwsh.exe' -User 'PC\me' -IntervalMinutes 0)
+    Check '間隔 0 なら繰り返しのトリガーを付けない' (-not $xm0.Task.Triggers.TimeTrigger)
+    [IO.File]::WriteAllText((Join-Path $root 'home-a/state/kick.json'), (@{ lastLaunchedAt = (Get-Date).AddHours(-1).ToString('yyyy-MM-ddTHH:mm:sszzz'); lastKind = 'work'; lastIdleAt = '' } | ConvertTo-Json), $utf8)
+    $kw2 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'weekly')
+    Check '週の解除時刻の起動では、前に起こしてからの間隔を見ない' ($kw2.Text -match 'KICK work') $kw2.Text
+    Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
+    Remove-Item $wFile -Force
+
     Write-Output '11. 手が空いた時のタスク（リモートの無い指令リポジトリ）'
     $c = Join-Path $root 'ctl-c'
     Run 'c' 'new-control-repo.ps1' @('-Path', $c) | Out-Null

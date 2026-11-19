@@ -27,6 +27,7 @@
 | 利用者が GitHub の画面でタスクファイルに回答を書き、エージェントが次の同期で読む | `waiting` のタスクで試す。同じ箇所を同時に書いたときの競合の直し方も確かめる |
 | macOS / Linux の `pwsh` での動作 | `tests/smoke.ps1` を流す |
 | 自動起動（`AutoLoopKick`）: 実際のログオン・スリープ復帰のあとに `kick.ps1` が動き、新しいウィンドウでセッションが起きて `/auto-loop next` を実行する | `install.ps1 -EnableKick` のあと、ログオン・スリープ復帰をまたぐ。`logs/auto-loop.log` の `[kick]` の行（起こした・見送りの理由）と、タスクファイルのログの `next:` の行を照らす |
+| 自動起動: タスク `AutoLoopKick` の間隔の繰り返し（`-KickIntervalMinutes 15`）と、`AutoLoopKickWeekly`（週の解除時刻の 6 分後、PC を起こす）の登録が、タスクスケジューラに受け付けられ、その時刻に動く | `install.ps1 -NoCopy -EnableKick -KickIntervalMinutes 15` のあと、`Get-ScheduledTask AutoLoopKick, AutoLoopKickWeekly | Get-ScheduledTaskInfo` の `NextRunTime`。次の週の解除時刻のあとに `logs/auto-loop.log` の `起動のきっかけ: weekly` の行 |
 | 自動起動: 入力待ちのウィンドウが開いたままでも起こし、手を動かしているセッションがあれば見送る（`Get-BusySessions`）。権限の確認待ちや、15 分を超えるツールの実行を、止まっているとみなしてしまわないか | 入力待ちのウィンドウを残して `kick.ps1 -DryRun` を実行し、`手が止まっているセッション … waiting-input=1` が出ること。長い試験を流している間に `-DryRun` して、`SKIP ほかのセッションが動いている` になるかを見る |
 | 自動起動: 記録が書かれなくなったセッションを終わらせる見張り（`idleCloseMinutes`）。長い処理（試験など）の途中で終わらせてしまわないか | 起こされたセッションを放置し、`[kick] セッションが終わった … idle-close` の行と、そのときの作業の状態を確かめる |
 | 自動起動: 上限の解除待ちのとき（復帰タスクが登録されている）に見送る | 上限で止まった状態で `kick.ps1 -DryRun` を実行し、`SKIP 上限の解除待ち` が出ること |
