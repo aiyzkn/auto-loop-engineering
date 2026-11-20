@@ -370,9 +370,12 @@ try {
     $kl4 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
     Check '解除時刻が過ぎた上限では見送らない' ($kl4.Text -match 'KICK work') $kl4.Text
     [IO.File]::WriteAllText($lFile, "$recUser`n$(& $recLim 60 'five_hour' -20)`n", $utf8)
-    [IO.File]::WriteAllText($oFile, "$recUser`n$(& $recLim (3 * 1440) 'seven_day' -10)`n", $utf8)
+    # 週の解除時刻は 1 つの時刻から、記録（resetsAt）と期待値の両方を作る（別々に今の時刻を読むと、分の境目をまたいだときに 1 分ずれる）
+    $weekAt = (Get-Date).AddMinutes(3 * 1440)
+    $recWeek = (& $recLim (3 * 1440) 'seven_day' -10) -replace '"resetsAt":\d+', ('"resetsAt":' + [DateTimeOffset]::new($weekAt).ToUnixTimeSeconds())
+    [IO.File]::WriteAllText($oFile, "$recUser`n$recWeek`n", $utf8)
     $kl5 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
-    $expWeek = (Get-Date).AddMinutes(3 * 1440).ToString('MM/dd HH:mm')
+    $expWeek = $weekAt.ToString('MM/dd HH:mm')
     Check '5 時間と週の上限が両方なら、遅いほう（週）の解除時刻で見送る' ($kl5.Text -match 'SKIP 上限の解除待ち（セッションの記録: seven_day、解除 ' + [regex]::Escape($expWeek)) $kl5.Text
     Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
     (Get-Item $lFile).LastWriteTime = (Get-Date).AddHours(-200); (Get-Item $oFile).LastWriteTime = (Get-Date).AddHours(-200)
