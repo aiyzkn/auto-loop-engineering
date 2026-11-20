@@ -8,6 +8,19 @@
 
 上限の解除時刻に PC を起こしてセッションを再開する仕組みは、別のスキル `auto-resume-global`（Windows 専用）が受け持ちます。このキットは、その**再開のあとに何を読んで続けるか**を受け持ちます。2 つのスキルの**正本は、どちらもこのキット**（`skills/auto-loop/`・`skills/auto-resume-global/`）です。[yzkn/skills](https://github.com/yzkn/skills) は配布先で、`claude-skill-auto-loop`・`claude-skill-auto-resume-global` として配っています（配布の手順は [DISTRIBUTION.md](skills/auto-resume-global/DISTRIBUTION.md)）。2 つは別々に導入でき、`auto-loop` が `auto-resume-global` の決まったもの（設定のキーなど）を読むだけです（[design.md の 1.1](docs/design.md#11-2-つのスキルの関係)）。
 
+## 関係するリポジトリ
+
+| リポジトリ | 役割 | 公開 |
+|---|---|---|
+| [aiyzkn/auto-loop-engineering](https://github.com/aiyzkn/auto-loop-engineering)（ここ） | キット。スキル（`auto-loop`・`auto-resume-global`）の正本、指令リポジトリのひな形、手引き | 公開 |
+| [aiyzkn/loop-control](https://github.com/aiyzkn/loop-control) | 指令リポジトリの実物。このキットのひな形（`skills/auto-loop/assets/control-repo/`）から作り、依頼・タスク・PC の状況を置く。コード・スクリプトは置かない | 非公開 |
+| [aiyzkn/loop-control-dashboard](https://github.com/aiyzkn/loop-control-dashboard) | 指令リポジトリを、ブラウザから見て操作するページ（GitHub Pages）。データは置かず、利用者のトークンで指令リポジトリを読み書きする | 公開 |
+| [yzkn/skills](https://github.com/yzkn/skills) | スキルの配布先（`claude-skill-auto-loop`・`claude-skill-auto-resume-global`） | 公開 |
+
+- **向き**: キット → 指令リポジトリ。指令リポジトリは、キットのひな形から作る。各 PC のスクリプト（キットの `install.ps1` が `~/.claude/skills/auto-loop/` に写す）が、指令リポジトリを読み書きする。指令リポジトリの中身（タスク・状態）は、キットには戻さない
+- **決まりの同期**: 指令リポジトリの決まり（`AGENTS.md`・`policy.md`・`templates/`）は、キットのひな形と同じに保つ。変えるときはキットのひな形を先に直して PR にし、指令リポジトリにも同じ変更を入れる（指令リポジトリで先に直したときは、キットにも戻す）。指令リポジトリの側の書き換えは、利用者の承認が要る（エージェントの書いてよい範囲の外）
+- **ダッシュボード**: 指令リポジトリの形（先頭のキー・節の名前・`inbox.md` の書き方）を読むので、決まりの形を変えるときは、ダッシュボードの読み取り（`parse.js`）・書き込み（`edit.js`）も合わせて直す
+
 ## 考え方
 
 | 課題（実際に起きたこと） | このキットの答え |
