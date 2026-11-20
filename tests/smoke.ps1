@@ -274,6 +274,19 @@ try {
     $st4 = Run 'a' 'status.ps1' @('-Json', '-NoPull')
     $readyIds = @(($st4.Text | ConvertFrom-Json).tasks | Where-Object { $_.status -eq 'ready' } | ForEach-Object { $_.id })
     Check '一覧は、ready の中で緊急が先・低いものが後' ($readyIds.Count -ge 2 -and $readyIds[0] -eq $hotId -and $readyIds[-1] -eq $lowId) $st4.Text
+    # order: 同じ優先度（normal）の中では order の小さいものが先、order の無いものは後ろ（古い順）
+    $o1 = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '順 1', '-Slug', 'ord1')
+    $o2 = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '順 2', '-Slug', 'ord2')
+    $o3 = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '順 3', '-Slug', 'ord3')
+    $oIds = @($o1, $o2, $o3 | ForEach-Object { (($_.Text -split "`n")[0] -replace '^OK ', '').Trim() })
+    foreach ($pair in @(@($oIds[2], '5'), @($oIds[1], '20'))) {
+        $f = Join-Path $a "projects/demo/tasks/$($pair[0]).md"
+        [IO.File]::WriteAllText($f, ([IO.File]::ReadAllText($f, $utf8) -replace '(?m)^order:.*$', "order: $($pair[1])"), $utf8)
+    }
+    $st4b = Run 'a' 'status.ps1' @('-Json', '-NoPull')
+    $normIds = @(($st4b.Text | ConvertFrom-Json).tasks | Where-Object { $_.status -eq 'ready' -and $_.id -in $oIds } | ForEach-Object { $_.id })
+    Check '同じ優先度の中は order の順・無いものは後ろ' (($normIds -join ',') -eq (@($oIds[2], $oIds[1], $oIds[0]) -join ',')) ($normIds -join ',')
+    Check 'ひな形に order の行がある' ([IO.File]::ReadAllText((Join-Path $a "projects/demo/tasks/$($oIds[0]).md"), $utf8) -match '(?m)^order:\s*$')
     $st5 = Run 'a' 'status.ps1' @('-NoPull')
     Check '一覧に緊急の件数が出る' ($st5.Text -match '緊急（priority: urgent）: 1 件') $st5.Text
 

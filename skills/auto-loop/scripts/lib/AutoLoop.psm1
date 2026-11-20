@@ -235,6 +235,7 @@ function Get-LoopTasks {
                     status    = $(if ($sub -eq 'archive' -and -not (& $get 'status')) { 'done' } elseif (& $get 'status') { & $get 'status' } else { '?' })
                     stage     = & $get 'stage'
                     priority  = & $get 'priority'
+                    order     = & $get 'order'
                     created   = & $get 'created'
                     assignee  = & $get 'assignee'
                     claimedBy = & $get 'claimed_by'
@@ -711,6 +712,14 @@ function Set-WeeklyTaskAt {
 function Get-PriorityRank {
     param([string]$Priority)
     switch ($Priority) { 'urgent' { return 0 } 'high' { return 1 } 'low' { return 3 } default { return 2 } }
+}
+
+# 同じ優先度の中の順（order。小さいほど先）。書いていない・数でない値は、いちばん後ろ（そのあとは古い順）
+function Get-OrderKey {
+    param([string]$Order)
+    $v = 0.0
+    if ($Order -and $Order.Trim() -match '^-?\d+(\.\d+)?$' -and [double]::TryParse($Order.Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $v }
+    return [double]::MaxValue
 }
 
 # assignee が自分に合うか（any・自分の ID・自分の道具の名前）
