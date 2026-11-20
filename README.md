@@ -77,13 +77,21 @@ pwsh -NoProfile -File skills/auto-loop/scripts/install.ps1 -AgentId pc1-claude-m
 
 # 4. 確かめる
 pwsh -NoProfile -File $HOME\.claude\skills\auto-loop\scripts\preflight.ps1
+
+# 5. ダッシュボードも用意する（下）
 ```
+
+**ダッシュボードも併せて導入します。** [aiyzkn/loop-control-dashboard](https://github.com/aiyzkn/loop-control-dashboard) は、指令リポジトリをブラウザ（スマートフォンを含む）から見て操作するページです（表示・書き換え・並べ替え・依頼の登録・PR のマージ）。データは置かず、利用者の GitHub のトークンで指令リポジトリを読み書きします。
+
+- 指令リポジトリが `aiyzkn/loop-control` なら、公開済みのページ <https://aiyzkn.github.io/loop-control-dashboard/> を開き、トークンを作って入れるだけです（作り方はページの右上の「トークン」の中と、ダッシュボードの README の「使い方」）
+- 別の指令リポジトリなら、ダッシュボードをフォークし、`app.js` の `CONFIG`（`org`・`owner`・`repo`）を合わせて GitHub Pages を有効にします
+- トークンは利用者が作り、ページにだけ入れます（エージェントには渡さない）。PC ごとの作業は要りません。PC の状況をページに出すには、自動起動（`install.ps1 -EnableKick`）を有効にします
 
 着手の順（着手のたびの優先度の判定・緊急・PC 1 台 1 リポジトリ・手が空いたときの作業）は、指令リポジトリの `AGENTS.md`「7. 着手の順」と、手順 `/auto-loop next` にあります。
 
 上限で止まっても自動で再開させたいときは、`auto-resume-global` も導入します（[skills/auto-resume-global/README.md](skills/auto-resume-global/README.md) の「導入」。パスは `skills/auto-resume-global/` に読み替える）。
 
-あとは Claude Code で `/auto-loop setup`（案件の登録、名簿への追加、`auto-resume-global` との連携）に進みます。2 台目以降の PC では、指令リポジトリを clone して 3 から行います。
+あとは Claude Code で `/auto-loop setup`（案件の登録、名簿への追加、`auto-resume-global` との連携、ダッシュボードの案内）に進みます。2 台目以降の PC では、指令リポジトリを clone して 3 から行います（ダッシュボードは PC に依らないので、1 回だけ）。
 
 日々の使い方は [docs/operations.md](docs/operations.md) にあります。
 
