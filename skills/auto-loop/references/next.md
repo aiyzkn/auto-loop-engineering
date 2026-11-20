@@ -16,7 +16,7 @@
    pwsh -NoProfile -File <scripts>/status.ps1 -Json
    ```
 
-   見るもの: `tasks`（状態ごとに、優先度の高い順・古い順に並んでいる）、`inbox` / `inboxUrgent`（受付の未整理と、そのうち `優先: 緊急`）、`idle`（手が空いた時に実行するタスクの定義。`due` が実施できるもの）、`active`（この PC で進行中の印）
+   見るもの: `tasks`（状態ごとに、優先度の高い順・古い順に並んでいる）、`inbox` / `inboxUrgent`（受付の未整理と、そのうち `優先: 緊急`）、`idle`（手が空いた時に実行するタスクの定義。`due` が実施できるもの）、`active`（この PC で進行中の印。`otherSessionLive` が `true` のものは、同じ PC の別のセッションが手を動かしている。再開・着手の候補から外す）
 2. **受付に未整理の件があれば、先に起票する**（[intake.md](intake.md) の A）。`優先: 緊急` は `-Priority urgent`
 3. **優先度を判定しなおす。** 近傍のタスク（自分が担当中の `doing` / `waiting` / `blocked`、自分に合う `ready`）を見比べる。強い順に: `priority`（`urgent` > `high` > `normal` > `low`）→ 回答・承認が届いた `waiting`、原因が取り除かれた `blocked` → 期限・ほかのタスクの前提 → 古い順。**`urgent` に上げてよいのは利用者だけ**
 4. **次の表で、行うことを 1 つ決める。**
