@@ -34,15 +34,16 @@ $rows = foreach ($t in $tasks) {
     if ($t.claimedBy -and $t.status -eq 'doing' -and $null -ne $age -and $age -gt $cfg.leaseHours) { $flag = 'stale' }
     if ($t.claimedBy -eq $me) { $flag = (@($flag, 'mine') | Where-Object { $_ }) -join ',' }
     [pscustomobject]@{
-        project = $t.project; id = $t.id; status = $t.status; stage = $t.stage; priority = $t.priority
+        project = $t.project; id = $t.id; status = $t.status; stage = $t.stage; priority = $t.priority; order = $t.order
         assignee = $t.assignee; claimedBy = $t.claimedBy; ageHours = $age; flag = $flag; title = $t.title
         created = $t.created
         sort = $(if ($order.ContainsKey($t.status)) { $order[$t.status] } else { 9 })
         prio = Get-PriorityRank $t.priority
+        ord = Get-OrderKey $t.order
     }
 }
-# 状態ごとに、優先度の高い順 → 古い順（着手の順の目安。AGENTS.md「7. 着手の順」）
-$rows = @($rows | Sort-Object sort, prio, created, project, id)
+# 状態ごとに、優先度の高い順 → order（利用者が並べた順。無いものは後ろ）→ 古い順（着手の順の目安。AGENTS.md「7. 着手の順」）
+$rows = @($rows | Sort-Object sort, prio, ord, created, project, id)
 
 # 受付（inbox.md）の未整理の件数: 「## 」見出し（書き方の例と「手が空いた時に実行するタスク」の節を除く。Get-InboxSummary）
 $inboxSummary = Get-InboxSummary $cfg
