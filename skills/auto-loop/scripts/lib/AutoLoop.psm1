@@ -875,7 +875,30 @@ function Get-IdleDefinitions {
 
 # --- 同じ PC の複数のセッション（20261120-no-parallel-sessions） ---
 # 担当はエージェント ID 単位なので、同じ PC・同じ ID の 2 つのセッション（上限からの再開と自動起動など）は、どちらも「自分の担当」とみなしてしまう。
-# 進行中の印（state/active/<タスク ID>.json）に担当したセッションを書き、別のセッションが生きて手を動かしている間は、claim / heartbeat / release を通さない。
+# 進行中の印（state/active/<案件>--<タスク ID>.json）に担当したセッションを書き、別のセッションが生きて手を動かしている間は、claim / heartbeat / release を通さない。
+
+# 進行中の印のファイル。別の案件に同じタスク ID があっても取り合わないよう、名前に案件を入れる（20261121-task-id-collision）。
+# Legacy は古い版の名前（state/active/<タスク ID>.json）。中身の project が同じときだけ、同じタスクの印として読む
+function Get-ActiveMarkPath {
+    param([Parameter(Mandatory)][string]$Project, [Parameter(Mandatory)][string]$Task, [switch]$Legacy)
+    $dir = Join-Path (Get-LoopHome) 'state/active'
+    if ($Legacy) { return (Join-Path $dir "$Task.json") }
+    return (Join-Path $dir "$Project--$Task.json")
+}
+
+# この PC の進行中の印をすべて読む。新旧の名前で同じ案件・同じタスクの印が 2 つあれば、新しい名前の方を採る
+function Get-ActiveMarks {
+    $dir = Join-Path (Get-LoopHome) 'state/active'
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    $byKey = [ordered]@{}
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' | Sort-Object { $_.BaseName -notlike '*--*' }, Name)) {
+        try { $m = Read-LoopText $f.FullName | ConvertFrom-Json } catch { continue }
+        if (-not $m) { continue }
+        $key = "$([string]$m.project)/$([string]$m.task)"
+        if (-not $byKey.Contains($key)) { $byKey[$key] = $m }
+    }
+    return @($byKey.Values)
+}
 
 # Claude Code のセッションの記録のフォルダ（試験では AUTO_LOOP_CLAUDE_PROJECTS で差し替える）
 function Get-ClaudeProjectsDir {

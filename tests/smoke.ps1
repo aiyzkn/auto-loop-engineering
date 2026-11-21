@@ -108,7 +108,7 @@ try {
 
     Write-Output '3. 担当の主張'
     $c1 = Run 'a' 'claim.ps1' @('claim', $id)
-    Check 'a が担当できる' ($c1.Code -eq 0 -and (Test-Path (Join-Path $root "home-a/state/active/$id.json"))) $c1.Text
+    Check 'a が担当できる' ($c1.Code -eq 0 -and (Test-Path (Join-Path $root "home-a/state/active/demo--$id.json"))) $c1.Text
     $c2 = Run 'b' 'claim.ps1' @('claim', $id)
     Check 'b は担当できない（終了コード 2）' ($c2.Code -eq 2 -and $c2.Text -match 'pc-a-claude が担当中') $c2.Text
     Check 'b の作業コピーは汚れていない' (-not (Gx $b @('status', '--porcelain')).Text.Trim())
@@ -128,7 +128,7 @@ try {
         $recDone = '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"終わりました"}]}}'
         $recLimit = '{"type":"assistant","error":"rate_limit","apiError":"usage_limit_reached","message":{"role":"assistant","content":[{"type":"text","text":"limit"}]}}'
         $as = { param($Sid, $ProcId) $env:CLAUDE_CODE_SESSION_ID = $Sid; $env:CLAUDE_PID = "$ProcId" }
-        $markOf = { param($T) Get-Content (Join-Path $root "home-a/state/active/$T.json") -Raw | ConvertFrom-Json }
+        $markOf = { param($T) Get-Content (Join-Path $root "home-a/state/active/demo--$T.json") -Raw | ConvertFrom-Json }
         # X は手を動かしている（最後が利用者の入力）
         [IO.File]::WriteAllText($logX, "$recWork`n", $utf8)
         $n3 = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '試験: セッション', '-Slug', 'sess', '-Stage', 'implement')
@@ -144,7 +144,7 @@ try {
         $s3 = Run 'a' 'claim.ps1' @('heartbeat', $id3, '-Note', 'Y から')
         Check 'Y は heartbeat もできない' ($s3.Code -eq 2) $s3.Text
         $s4 = Run 'a' 'claim.ps1' @('release', $id3, '-Status', 'ready')
-        Check 'Y は release もできない（印は残る）' ($s4.Code -eq 2 -and (Test-Path (Join-Path $root "home-a/state/active/$id3.json"))) $s4.Text
+        Check 'Y は release もできない（印は残る）' ($s4.Code -eq 2 -and (Test-Path (Join-Path $root "home-a/state/active/demo--$id3.json"))) $s4.Text
         Check 'Y の失敗で作業コピーは汚れない' (-not (Gx $a @('status', '--porcelain')).Text.Trim())
         $st6 = Run 'a' 'status.ps1' @('-Json', '-NoPull')
         $act = @(($st6.Text | ConvertFrom-Json).active | Where-Object { $_.task -eq $id3 })
@@ -197,6 +197,28 @@ try {
         $env:CLAUDE_CODE_SESSION_ID = $oldSid; $env:CLAUDE_PID = $oldPid; $env:AUTO_LOOP_CLAUDE_PROJECTS = $oldProj
     }
 
+    Write-Output '3c. 別の案件の同じ ID と、古い名前の印（20261121-task-id-collision）'
+    New-Item -ItemType Directory -Force (Join-Path $a 'projects/demo2') | Out-Null
+    Copy-Item (Join-Path $a 'projects/demo/project.md') (Join-Path $a 'projects/demo2/project.md')
+    $nx = Run 'a' 'new-task.ps1' @('-Project', 'demo2', '-Title', '別の案件', '-Slug', 'race')
+    Check '別の案件でも、全案件で重ならない ID になる' ($nx.Code -eq 0 -and $nx.Text -match "OK $id-3") $nx.Text
+    Remove-Item -Recurse -Force (Join-Path $a 'projects/demo2')   # 送らない（後の試験の件数を変えない）
+    $actDir = Join-Path $root 'home-a/state/active'
+    $newMark = Join-Path $actDir "demo--$id.json"; $legacy = Join-Path $actDir "$id.json"
+    # 古い名前の印が別の案件のもの → 読まない・消さない
+    [IO.File]::WriteAllText($legacy, (@{ task = $id; project = 'demo2'; agentId = 'pc-a-claude'; cwd = $root } | ConvertTo-Json), $utf8)
+    $hx = Run 'a' 'claim.ps1' @('heartbeat', $id, '-Project', 'demo', '-Note', '別の案件の古い印')
+    $stx = @((Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json | ForEach-Object { $_.active } | Where-Object { $_.task -eq $id })
+    Check '別の案件の古い名前の印は残し、自分の印は新しい名前' ($hx.Code -eq 0 -and (Test-Path $legacy) -and (Test-Path $newMark) -and ((Get-Content $legacy -Raw | ConvertFrom-Json).project -eq 'demo2')) $hx.Text
+    Check '一覧には案件ごとに 1 つずつ出る' ($stx.Count -eq 2 -and (@($stx.project) -contains 'demo') -and (@($stx.project) -contains 'demo2')) ($stx | ConvertTo-Json)
+    Remove-Item $legacy -Force
+    # 古い名前の印が同じ案件のもの → 新しい名前に移す
+    Move-Item $newMark $legacy
+    $stl = @((Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json | ForEach-Object { $_.active } | Where-Object { $_.task -eq $id })
+    Check '一覧は古い名前の印も読む' ($stl.Count -eq 1 -and $stl[0].project -eq 'demo')
+    $hm = Run 'a' 'claim.ps1' @('heartbeat', $id, '-Note', '古い印の移し替え')
+    Check '同じ案件の古い名前の印は、新しい名前に移る' ($hm.Code -eq 0 -and (Test-Path $newMark) -and -not (Test-Path $legacy)) $hm.Text
+
     Write-Output '4. push の競り負け（b の push の直前に a が主張する）'
     $id2 = "$id-2"
     $hook = Join-Path $b '.git/hooks/pre-push'
@@ -221,7 +243,7 @@ try {
 
     Write-Output '6. 解放と保管'
     $rl = Run 'b' 'claim.ps1' @('release', $id, '-Status', 'done', '-Note', '完了')
-    Check '完了で archive に移る' ($rl.Code -eq 0 -and (Test-Path (Join-Path $b "projects/demo/archive/$id.md")) -and -not (Test-Path (Join-Path $b $taskRel)) -and -not (Test-Path (Join-Path $root "home-b/state/active/$id.json"))) $rl.Text
+    Check '完了で archive に移る' ($rl.Code -eq 0 -and (Test-Path (Join-Path $b "projects/demo/archive/$id.md")) -and -not (Test-Path (Join-Path $b $taskRel)) -and -not (Test-Path (Join-Path $root "home-b/state/active/demo--$id.json"))) $rl.Text
     $c5 = Run 'a' 'claim.ps1' @('claim', $id)
     Check '保管済みは担当できない' ($c5.Code -eq 2) $c5.Text
     $st2 = Run 'a' 'status.ps1' @()
