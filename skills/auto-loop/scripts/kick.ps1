@@ -1,4 +1,4 @@
-﻿#requires -Version 7.0
+#requires -Version 7.0
 <#
 .SYNOPSIS
   起動時（ログオン時）・スリープ解除時に、やることがあれば新しいウィンドウで Claude Code のセッションを起こす。
@@ -20,6 +20,7 @@
   タスク AutoLoopKickWeekly の時刻が違っていれば登録し直す（1 の前に行う。DryRun では表示だけ）。
   判断のたびに、PC の状況を指令リポジトリの state/pcs/<agentId>.json に書く（kick.enabled のときだけ。中身が変わったときか
   kick.statusEveryMinutes 分ごと。このファイルだけをコミットし、ほかの変更が無いときだけ push する。ダッシュボードが読む）。
+  PC の状況には、直近 7 日の上限の窓（limits: 種類 five_hour / seven_day・推定の開始・解除時刻・当たったか）も載せる（セッションの記録から。state/kick-limits.json に前回の結果を残し、差分だけ読む）。
   終了コード: 0 = 起こした・見送った / 1 = 設定が読めない
 .PARAMETER Trigger
   起動のきっかけ（ログに書く）。weekly（週の解除時刻）のときは 6 の間隔を見ない
@@ -107,6 +108,15 @@ if ($kick.weeklyAtReset -and ($kick.enabled -or $DryRun)) {
         elseif ($DryRun) { Write-Output 'INFO 週の解除時刻: 分からない（週の上限の記録が無い。kick.weeklyResetAt で手で決められる）' }
     }
     catch { Write-LoopLog 'kick' "週の解除時刻のタスクを合わせられなかった: $($_.Exception.Message)" }
+}
+
+# 0b. 直近 7 日の上限の窓（5 時間・週）を、PC の状況に載せる（ダッシュボードの帯。失敗しても判断は続ける）
+if ($kick.enabled -or $DryRun) {
+    try {
+        $script:pcStatus.limits = @(Update-LimitWindows -ProjectsDir $projects -Days 7 -NoSave:$DryRun)
+        if ($DryRun) { Write-Output "INFO 上限の窓（直近 7 日）: $($script:pcStatus.limits.Count) 件" }
+    }
+    catch { Write-LoopLog 'kick' "上限の窓を集められなかった: $($_.Exception.Message)" }
 }
 
 # 1. 有効か

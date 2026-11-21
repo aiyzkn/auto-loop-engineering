@@ -43,7 +43,7 @@ PC（とエージェント）ごとに 1 回行う。何度行っても安全（
    | `intervalMinutes` | `0` | この分ごとにも `kick.ps1` を起動する（`0` なら使わない。`install.ps1 -NoCopy -EnableKick -KickIntervalMinutes 15` で設定とタスクを一緒に変える）。起こすかの判断は同じで、`minIntervalHours` の内は続けて起こさない（間隔の起動を生かすなら、`minIntervalHours` を `0.5` などに下げる） |
    | `weeklyAtReset` | `true` | 週の上限の解除時刻の 6 分後に、毎週 PC を起こして `kick.ps1` を起動する（タスク `AutoLoopKickWeekly`。このときは `minIntervalHours` を見ない）。解除時刻が変わったら `kick.ps1` が登録し直す |
    | `weeklyResetAt` | `''` | 週の解除の曜日・時刻を手で決める（例 `Thu 08:00`、`木 8:00`）。空なら、セッションの記録の週の上限（`rateLimitType` が `seven_day` 系）の `resetsAt` から取る（結果は `state/kick-weekly.json`） |
-   | `statusEveryMinutes` | `60` | PC の状況（指令リポジトリの `state/pcs/<ID>.json`。判断・理由・セッションの数・次の復帰・週次の起動の時刻）を、中身が変わらなくてもこの分ごとに書き直す（`0` なら書かない）。このファイルだけをコミットし、作業ツリーにほかの変更が無いときだけ push する。パスは書かない |
+   | `statusEveryMinutes` | `60` | PC の状況（指令リポジトリの `state/pcs/<ID>.json`。判断・理由・セッションの数・次の復帰・週次の起動の時刻・直近 7 日の上限の窓）を、中身が変わらなくてもこの分ごとに書き直す（`0` なら書かない）。このファイルだけをコミットし、作業ツリーにほかの変更が無いときだけ push する。パスは書かない |
    | `permissionMode` / `remoteControl` | `auto` / `true` | 起こすセッションの権限モード・Remote Control |
    | `prompt` | 空 | 最初に送る指示（空なら既定の「`/auto-loop next` を実行」） |
 

@@ -1,4 +1,4 @@
-﻿#requires -Version 7.0
+#requires -Version 7.0
 <#
 .SYNOPSIS
   auto-loop のスクリプトの通し試験。一時フォルダに「リモート（bare）+ エージェント 2 つ分の clone」を作って確かめる。
@@ -446,6 +446,25 @@ try {
     $cfgK.kick.enabled = $false
     [IO.File]::WriteAllText($cfgPath, ($cfgK | ConvertTo-Json -Depth 5), $utf8)
     Remove-Item $sFile -Force
+
+    # 上限の窓（ダッシュボードの帯。20261121-dashboard-improve）: 関数を直接呼ぶ（kick は起こさない）
+    Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
+    $limProj = Join-Path $root 'lim-projects'; New-Item -ItemType Directory -Force (Join-Path $limProj 'p') | Out-Null
+    $oldHome = $env:AUTO_LOOP_HOME; $env:AUTO_LOOP_HOME = Join-Path $root 'home-lim'
+    $ux = { param([double]$H) [DateTimeOffset]::Now.AddHours($H).ToUnixTimeSeconds() }
+    $limRec = { param($Reset, [string]$Kind, [string]$St) '{"type":"assistant","error":"rate_limit","apiErrorParams":{"rate_limit_info":{"status":"' + $St + '","resetsAt":' + $Reset + ',"rateLimitType":"' + $Kind + '"}}}' }
+    $r5 = & $ux 2; $r7 = & $ux 72; $rOld = & $ux (-200)
+    [IO.File]::WriteAllText((Join-Path $limProj 'p/a.jsonl'), ((& $limRec $r5 'five_hour' 'allowed_warning'), (& $limRec $r5 'five_hour' 'rejected'), (& $limRec $r7 'seven_day_overage_included' 'rejected'), (& $limRec $rOld 'five_hour' 'rejected')) -join "`n", $utf8)
+    $lw = @(Update-LimitWindows -ProjectsDir $limProj -Days 7)
+    $w5 = @($lw | Where-Object { $_.kind -eq 'five_hour' }); $w7 = @($lw | Where-Object { $_.kind -eq 'seven_day' })
+    Check '上限の窓: 種類と解除時刻ごとに 1 件、7 日より前は捨てる、週の派生の種類は seven_day' ($lw.Count -eq 2 -and $w5.Count -eq 1 -and $w5[0].hit -and $w7.Count -eq 1 -and ([datetimeoffset]::Parse($w5[0].resetsAt).ToUnixTimeSeconds() -eq $r5) -and (([datetimeoffset]::Parse($w5[0].resetsAt) - [datetimeoffset]::Parse($w5[0].startsAt)).TotalHours -eq 5) -and (([datetimeoffset]::Parse($w7[0].resetsAt) - [datetimeoffset]::Parse($w7[0].startsAt)).TotalDays -eq 7)) ($lw | ConvertTo-Json)
+    # 2 回目: 古い記録のファイルは読まず（前回の結果を使う）、新しく書かれた記録だけを足す
+    (Get-Item (Join-Path $limProj 'p/a.jsonl')).LastWriteTime = (Get-Date).AddHours(-1)
+    $r5b = & $ux 6
+    [IO.File]::WriteAllText((Join-Path $limProj 'p/b.jsonl'), (& $limRec $r5b 'five_hour' 'rejected'), $utf8)
+    $lw2 = @(Update-LimitWindows -ProjectsDir $limProj -Days 7)
+    Check '上限の窓: 前回の結果に、新しい記録の分を足す' ($lw2.Count -eq 3 -and @($lw2 | Where-Object { $_.kind -eq 'five_hour' }).Count -eq 2 -and (Test-Path (Join-Path $root 'home-lim/state/kick-limits.json'))) ($lw2 | ConvertTo-Json)
+    $env:AUTO_LOOP_HOME = $oldHome
 
     Write-Output '11. 手が空いた時のタスク（リモートの無い指令リポジトリ）'
     $c = Join-Path $root 'ctl-c'
