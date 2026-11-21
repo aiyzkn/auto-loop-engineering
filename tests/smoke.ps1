@@ -362,7 +362,7 @@ try {
     $k4 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
     Check 'auto-resume-global が停止中なら見送る' ($k4.Text -match 'SKIP auto-resume-global が停止中') $k4.Text
     Remove-Item (Join-Path $arFake 'disabled') -Force
-    [IO.File]::WriteAllText((Join-Path $root 'home-a/state/kick.json'), (@{ lastLaunchedAt = (Get-Date).AddHours(-1).ToString('yyyy-MM-ddTHH:mm:sszzz'); lastKind = 'work'; lastIdleAt = '' } | ConvertTo-Json), $utf8)
+    [IO.File]::WriteAllText((Join-Path $root 'home-a/state/kick.json'), (@{ lastLaunchedAt = (Get-Date).AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz'); lastKind = 'work'; lastIdleAt = '' } | ConvertTo-Json), $utf8)
     $k5 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
     Check '前に起こしてから間が無ければ見送る' ($k5.Text -match 'SKIP 前に起こしてから') $k5.Text
     Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
