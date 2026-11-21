@@ -40,7 +40,7 @@ PC（とエージェント）ごとに 1 回行う。何度行っても安全（
    | `idle` / `idleMinIntervalHours` | `true` / `24` | 通常のタスクが無いとき、手が空いたときの作業のために起こすか・その間隔 |
    | `busyMinutes` | `15` | 手を動かしているセッション（最後の記録が利用者の入力・ツールの結果・ツールの呼び出しで、この分の内に書かれたもの。サブエージェントの記録を含む）があれば、起こさない（共倒れを防ぐ）。入力待ち・指示が無い・上限の解除待ち・この分より長く書かれていないセッションは数えない |
    | `idleCloseMinutes` | `60` | 起こしたセッションの記録がこの分のあいだ書かれなければ、終わらせる（`0` なら終わらせない。その間 PC は眠らず、次も起こせない） |
-   | `settledCloseMinutes` | `5` | 入力待ちがこの分続き、そのセッションが `claim.ps1` で触れたタスクのどれも手に持っていない（判断待ち `waiting`・`blocked`・完了 `done`・`dropped`・解放 `ready`）とき、セッションを終わらせ、ウィンドウを閉じる（`0` なら終わらせない。見張りは `close-watch.ps1`）。起こしたセッションは、何も担当しなかったときも終わらせる |
+   | `settledCloseMinutes` | `5` | 入力待ちがこの分続き、そのセッションが `claim.ps1` で触れたタスクのどれも手に持っていない（判断待ち `waiting`・マージ待ち `review`・`blocked`・完了 `done`・`dropped`・解放 `ready`）とき、セッションを終わらせ、ウィンドウを閉じる（`0` なら終わらせない。見張りは `close-watch.ps1`）。起こしたセッションは、何も担当しなかったときも終わらせる |
    | `settledCloseResumed` | `true` | `auto-resume-global` が再開したセッションにも、上と同じ見張りを付ける（`kick.ps1` が動くたびに、再開中の印 `state/running/<ID>.json` を見て付ける）。`auto-loop` のタスクに触れていない再開のセッションは終わらせない |
    | `intervalMinutes` | `0` | この分ごとにも `kick.ps1` を起動する（`0` なら使わない。`install.ps1 -NoCopy -EnableKick -KickIntervalMinutes 15` で設定とタスクを一緒に変える）。起こすかの判断は同じで、`minIntervalHours` の内は続けて起こさない（間隔の起動を生かすなら、`minIntervalHours` を `0.5` などに下げる） |
    | `weeklyAtReset` | `true` | 週の上限の解除時刻の 6 分後に、毎週 PC を起こして `kick.ps1` を起動する（タスク `AutoLoopKickWeekly`。このときは `minIntervalHours` を見ない）。解除時刻が変わったら `kick.ps1` が登録し直す |

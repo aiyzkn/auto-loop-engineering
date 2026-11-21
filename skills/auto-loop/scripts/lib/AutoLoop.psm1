@@ -1032,7 +1032,7 @@ function Get-SessionTaskRefs {
 function Get-HeldTasks {
     param($Config, [string[]]$TaskIds, [string[]]$SessionIds)
     $me = [string]$Config.agentId
-    $settled = @('waiting', 'blocked', 'done', 'dropped', 'ready')
+    $settled = @('waiting', 'review', 'blocked', 'done', 'dropped', 'ready')
     try { $all = @(Get-LoopTasks $Config); $marks = @(Get-ActiveMarks) } catch { return $null }
     $held = @(); $seen = @()
     foreach ($id in @($TaskIds)) {

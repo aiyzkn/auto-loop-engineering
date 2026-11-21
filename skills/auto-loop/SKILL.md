@@ -45,7 +45,7 @@ description: "ループエンジニアリング（長時間・複数案件の作
 依頼（inbox.md / 直接 / タスクファイル）
   → intake     タスクファイルに起こす（status: ready）
   → start      claim（push で確定）→ preflight → 計画・承認が要る操作の洗い出し
-  → 作業       区切りごとに checkpoint。必要なら delegate。判断待ちは status: waiting
+  → 作業       区切りごとに checkpoint。必要なら delegate。判断待ちは status: waiting、マージ待ちは status: review
   → （中断）   上限・再起動・分岐 → resume（状態ファイル・作業ツリー・前提を確かめ直す）
   → finish     報告 → 解放（done → archive/）→ 作業ツリーの片付け
   → next       次にやることを決める（起動時・スリープ解除時に自動で起こされたときも、ここから）
