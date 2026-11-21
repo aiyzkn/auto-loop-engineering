@@ -13,7 +13,7 @@
     5. この PC で、手を動かしているセッションが無い。手が止まっているもの（claude が起動していない / 起動したが指示が無い /
        利用者の入力待ち / 上限の解除待ち / kick.busyMinutes 分より長く書かれていない）は数えない（Get-BusySessions）
     6. 前に起こしてから kick.minIntervalHours 時間が過ぎている（週の解除時刻の起動 -Trigger weekly では見ない）
-    7. やることがある: 自分が担当の doing / 回答の届いた waiting・blocked / 自分に合う ready / 受付の未整理（work）。
+    7. やることがある: 自分が担当の doing（ダッシュボードで回答がそろうと waiting から doing に戻る）/ 回答の届いた waiting・review・blocked / 自分に合う ready / 受付の未整理（work）。
        どれも無ければ、手が空いたときの作業（idle。kick.idle が true で、前の idle から kick.idleMinIntervalHours 時間が過ぎているとき）
   起こしたセッションは /auto-loop next を実行する（指令リポジトリの AGENTS.md「7. 着手の順」）。
   あわせて、kick.weeklyAtReset が true なら、週の上限の解除時刻（記録の resetsAt か kick.weeklyResetAt）を調べ、
@@ -232,7 +232,7 @@ $tasks = @(Get-LoopTasks $cfg)
 $repo = [string]$cfg.controlRepoPath
 $doing = @($tasks | Where-Object { $_.claimedBy -eq $me -and $_.status -eq 'doing' })
 $answered = @()
-foreach ($t in @($tasks | Where-Object { $_.claimedBy -eq $me -and $_.status -in @('waiting', 'blocked') })) {
+foreach ($t in @($tasks | Where-Object { $_.claimedBy -eq $me -and $_.status -in @('waiting', 'review', 'blocked') })) {
     # 最後にこのファイルを書いたのが自分でなければ、利用者（か別の書き手）が回答・決定を書いた見込み
     $subject = (Invoke-Git $repo @('log', '-1', '--format=%s', '--', (Get-RelPath $repo $t.path))).Text.Trim()
     if ($subject -and -not $subject.StartsWith("[$me]")) { $answered += $t }

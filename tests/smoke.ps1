@@ -243,6 +243,10 @@ try {
     Check 'a は主張の喪失に気づく（終了コード 2）' ($h2.Code -eq 2 -and $h2.Text -match '主張が失われている') $h2.Text
 
     Write-Output '6. 解放と保管'
+    $rv = Run 'b' 'claim.ps1' @('heartbeat', $id, '-Status', 'review', '-Note', 'PR を作成。マージ待ち')
+    Check 'マージ待ち（review）にでき、担当は保たれる' ($rv.Code -eq 0 -and ([IO.File]::ReadAllText((Join-Path $b $taskRel), $utf8) -match '(?s)status: review.*claimed_by: pc-b-claude')) $rv.Text
+    $rvs = Run 'b' 'status.ps1' @()
+    Check '一覧で review は人の対応が要るものに数える' ($rvs.Text -match '人の対応が要る: \d+ 件（[^）]*review') $rvs.Text
     $rl = Run 'b' 'claim.ps1' @('release', $id, '-Status', 'done', '-Note', '完了')
     Check '完了で archive に移る' ($rl.Code -eq 0 -and (Test-Path (Join-Path $b "projects/demo/archive/$id.md")) -and -not (Test-Path (Join-Path $b $taskRel)) -and -not (Test-Path (Join-Path $root "home-b/state/active/demo--$id.json"))) $rl.Text
     $c5 = Run 'a' 'claim.ps1' @('claim', $id)
