@@ -149,6 +149,7 @@ try {
         $st6 = Run 'a' 'status.ps1' @('-Json', '-NoPull')
         $act = @(($st6.Text | ConvertFrom-Json).active | Where-Object { $_.task -eq $id3 })
         Check '一覧（Y から）: 別のセッションが作業中と出る' ($act.Count -eq 1 -and $act[0].otherSessionLive -and $act[0].sessionState -eq 'working') $st6.Text
+        Check '一覧（-Json）: thisSession は真偽で出る' ($act.Count -eq 1 -and $act[0].thisSession -is [bool] -and -not $act[0].thisSession) $st6.Text
         # X が上限で止まった → Y（フォークの再開など）が続けられる
         [IO.File]::AppendAllText($logX, "$recLimit`n", $utf8)
         $s5 = Run 'a' 'claim.ps1' @('heartbeat', $id3, '-Note', 'Y が続ける')
