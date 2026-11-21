@@ -243,6 +243,10 @@ try {
     Check 'a は主張の喪失に気づく（終了コード 2）' ($h2.Code -eq 2 -and $h2.Text -match '主張が失われている') $h2.Text
 
     Write-Output '6. 解放と保管'
+    $rv = Run 'b' 'claim.ps1' @('heartbeat', $id, '-Status', 'review', '-Note', 'PR を作成。マージ待ち')
+    Check 'マージ待ち（review）にでき、担当は保たれる' ($rv.Code -eq 0 -and ([IO.File]::ReadAllText((Join-Path $b $taskRel), $utf8) -match '(?s)status: review.*claimed_by: pc-b-claude')) $rv.Text
+    $rvs = Run 'b' 'status.ps1' @()
+    Check '一覧で review は人の対応が要るものに数える' ($rvs.Text -match '人の対応が要る: \d+ 件（[^）]*review') $rvs.Text
     $rl = Run 'b' 'claim.ps1' @('release', $id, '-Status', 'done', '-Note', '完了')
     Check '完了で archive に移る' ($rl.Code -eq 0 -and (Test-Path (Join-Path $b "projects/demo/archive/$id.md")) -and -not (Test-Path (Join-Path $b $taskRel)) -and -not (Test-Path (Join-Path $root "home-b/state/active/demo--$id.json"))) $rl.Text
     $c5 = Run 'a' 'claim.ps1' @('claim', $id)
@@ -365,6 +369,36 @@ try {
     [IO.File]::WriteAllText((Join-Path $root 'home-a/state/kick.json'), (@{ lastLaunchedAt = (Get-Date).AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz'); lastKind = 'work'; lastIdleAt = '' } | ConvertTo-Json), $utf8)
     $k5 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
     Check '前に起こしてから間が無ければ見送る' ($k5.Text -match 'SKIP 前に起こしてから') $k5.Text
+
+    # 即時実行の印（ダッシュボードの「いま実行」「このタスクを実行」。state/kick/<ID>.json）
+    $kn0 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
+    Check '即時実行: 印が無ければ何もしない' ($kn0.Text -match 'SKIP 即時実行の印が無い') $kn0.Text
+    $reqRel = 'state/kick/pc-a-claude.json'; $reqPath = Join-Path $a $reqRel
+    New-Item -ItemType Directory -Force (Split-Path -Parent $reqPath) | Out-Null
+    $writeReq = { param([string]$T, [double]$AgoHours = 0) [IO.File]::WriteAllText($reqPath, (@{ requestedAt = (Get-Date).AddHours(-$AgoHours).ToString('yyyy-MM-ddTHH:mm:sszzz'); by = 'dashboard:test'; task = $T } | ConvertTo-Json), $utf8) }
+    & $writeReq ''
+    $kn1 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
+    Check '即時実行: 前に起こしてから間が無くても起こす判断' ($kn1.Text -match 'KICK work') $kn1.Text
+    $mineId = @((Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json | ForEach-Object { $_.tasks } | Where-Object { $_.claimedBy -eq 'pc-a-claude' } | ForEach-Object { $_.id })[0]
+    & $writeReq $mineId
+    $kn2 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
+    Check '即時実行: 指定のタスクを渡す' ($kn2.Text -match 'KICK work' -and $kn2.Text -match "指定=$([regex]::Escape([string]$mineId))") $kn2.Text
+    & $writeReq '20991231-none'
+    $kn3 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
+    Check '即時実行: 着手・再開できないタスクの指定は見送る' ($kn3.Text -match 'SKIP 即時実行の指定のタスク 20991231-none は') $kn3.Text
+    & $writeReq 'x; rm -rf'
+    $kn4 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
+    Check '即時実行: タスク ID の形が違えば見送る' ($kn4.Text -match 'SKIP 即時実行の印のタスク ID の形が違う') $kn4.Text
+    & $writeReq '' 30
+    $kn5 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
+    Check '即時実行: 古い印（24 時間超）は見送る' ($kn5.Text -match 'SKIP 即時実行の印が古い') $kn5.Text
+    & $writeReq ''
+    $kp1 = Run 'a' 'kick-poll.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check 'kick-poll: 印があれば kick.ps1 -Trigger now を呼ぶ' ($kp1.Text -match 'KICK work') $kp1.Text
+    Gx $a @('add', '--', $reqRel) | Out-Null; Gx $a @('commit', '-q', '-m', 'kick request', '--', $reqRel) | Out-Null
+    $kn6 = Run 'a' 'kick.ps1' @('-SkipSystemChecks', '-Trigger', 'now')
+    $tracked = (Gx $a @('ls-files', '--', $reqRel)).Text.Trim()
+    Check '即時実行: 起こせない理由が続く見送り（無効）では印を消してコミットする' ($kn6.Text -match 'SKIP kick.enabled が false' -and -not (Test-Path $reqPath) -and -not $tracked -and (Gx $a @('log', '-1', '--format=%s')).Text -match 'kick-request') $kn6.Text
     Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
     Check '見送りの理由がログに残る' ((Get-Content (Join-Path $root 'home-a/logs/auto-loop.log') -Raw) -match '\[kick\] 見送り')
 

@@ -72,7 +72,7 @@ projects/<案件>/
 
 ### 状態（`status`）と段階（`stage`）
 
-- `status`: `draft` → `ready` → `doing` ⇄ `waiting` / `blocked` → `done` / `dropped`。人の対応が要るのは `waiting`（判断・承認）と `blocked`（外部の要因）だけにし、一覧で先頭に出す
+- `status`: `draft` → `ready` → `doing` ⇄ `waiting` / `review` / `blocked` → `done` / `dropped`。「いま誰の番か」で分ける。人の対応が要るのは `waiting`（判断・承認）・`review`（マージ待ち）・`blocked`（外部の要因）だけにし、一覧で先頭に出す。利用者が答えたら `doing` に戻す（回答待ちとして残さない）。PR / MR を出したタスクは `done` にせず `review` にし、マージを確かめてから `done` にする（マージ前に一覧から消えないように。2026-11-21 20261121-kick-now-status）
 - `stage`: `propose` / `implement` / `merge`。「提案だけ」「実装まで」「マージまで」を依頼の時点で明示する型（論点 6-7）。指定が無ければ、いちばん狭い `propose`。範囲の表は `policy.md`
 
 ## 3. 複数の PC・複数のエージェント
