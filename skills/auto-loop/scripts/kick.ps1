@@ -23,9 +23,14 @@
   判断のたびに、PC の状況を指令リポジトリの state/pcs/<agentId>.json に書く（kick.enabled のときだけ。中身が変わったときか
   kick.statusEveryMinutes 分ごと。このファイルだけをコミットし、ほかの変更が無いときだけ push する。ダッシュボードが読む）。
   PC の状況には、直近 7 日の上限の窓（limits: 種類 five_hour / seven_day・推定の開始・解除時刻・当たったか）も載せる（セッションの記録から。state/kick-limits.json に前回の結果を残し、差分だけ読む）。
+  即時実行（-Trigger now）: ダッシュボードの「いま実行」「このタスクを実行」が指令リポジトリに書いた印（state/kick/<agentId>.json。
+  requestedAt・by・task（任意））を読んで起こす。kick-poll.ps1 が kick.pollMinutes 分ごとに見に行き、印があれば -Trigger now で呼ぶ。
+  6 の間隔は見ない。task があれば、そのタスクを再開・着手するよう指示して起こす（7 の「やること」が無くても起こす）。
+  起こした・やることが無い・印が古い（24 時間超）など、続けても起こせないときは印を消して push する（結果は PC の状況の lastRequest）。
+  ほかのセッションが動いている・上限の解除待ちのときは印を残し、次の見回りでやり直す
   終了コード: 0 = 起こした・見送った / 1 = 設定が読めない
 .PARAMETER Trigger
-  起動のきっかけ（ログに書く）。weekly（週の解除時刻）のときは 6 の間隔を見ない
+  起動のきっかけ（ログに書く）。weekly（週の解除時刻）・now（即時実行の印）のときは 6 の間隔を見ない
 .PARAMETER DryRun
   判断だけを表示する（起こさない・記録を書かない・kick.enabled を見ない）
 .PARAMETER Force
@@ -39,7 +44,7 @@ param(
     [switch]$DryRun,
     [switch]$Force,
     [switch]$SkipSystemChecks,
-    [ValidateSet('', 'weekly')][string]$Trigger = ''
+    [ValidateSet('', 'weekly', 'now')][string]$Trigger = ''
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'lib/AutoLoop.psm1') -Force
@@ -66,9 +71,20 @@ function Save-PcStatus([string]$Decision, [string]$Reason) {
     $r = Write-PcStatus -Config $cfg -Status $script:pcStatus -EveryMinutes ([double]$kick.statusEveryMinutes)
     if ($r -like 'failed*' -or $r -like 'written-local*') { Write-LoopLog 'kick' "PC の状況: $r" }
 }
-function Skip([string]$Reason) {
+# 即時実行の印（-Trigger now）。$script:request が $null でなければ、処理したあとに消す
+$script:request = $null
+function Complete-Request([string]$Result, [switch]$Keep) {
+    if (-not $script:request) { return }
+    $script:pcStatus.lastRequest = [ordered]@{ requestedAt = [string]$script:request.requestedAt; by = [string]$script:request.by; task = [string]$script:request.task; handledAt = (Get-NowIso); result = $Result; kept = [bool]$Keep }
+    if ($Keep -or $DryRun) { return }
+    $r = Remove-KickRequest -Config $cfg -Note $Result
+    if ($r -notlike 'removed-pushed*') { Write-LoopLog 'kick' "即時実行の印: $r" }
+}
+# -Retry: ほかのセッションが動いている・上限の解除待ちなど、あとで起こせる見送り（即時実行の印を残す）
+function Skip([string]$Reason, [switch]$Retry) {
     Write-LoopLog 'kick' "見送り$(if ($DryRun) { '（DryRun）' }): $Reason"
     Write-Output "SKIP $Reason"
+    Complete-Request "見送り: $Reason" -Keep:$Retry
     Save-PcStatus 'skip' $Reason
     exit 0
 }
@@ -121,8 +137,18 @@ if ($kick.enabled -or $DryRun) {
     catch { Write-LoopLog 'kick' "上限の窓を集められなかった: $($_.Exception.Message)" }
 }
 
+# 0c. 即時実行の印を読む（-Trigger now）
+if ($Trigger -eq 'now') {
+    $req = Read-KickRequest $cfg
+    if (-not $req) { Write-Output 'SKIP 即時実行の印が無い'; exit 0 }
+    $script:request = $req
+    if ($req.task -and $req.task -notmatch '^\d{8}-[A-Za-z0-9][A-Za-z0-9-]*$') { Skip "即時実行の印のタスク ID の形が違う（$($req.task)）" }
+    $reqAge = Get-HoursSince ([string]$req.requestedAt)
+    if ($null -eq $reqAge -or $reqAge -gt 24) { Skip "即時実行の印が古い・時刻が読めない（$($req.requestedAt)）" }
+}
+
 # 1. 有効か
-if ($Trigger) { Write-LoopLog 'kick' "起動のきっかけ: $Trigger" }
+if ($Trigger) { Write-LoopLog 'kick' "起動のきっかけ: $Trigger$(if ($script:request) { "（$($script:request.by) が $($script:request.requestedAt) に依頼$(if ($script:request.task) { "、タスク $($script:request.task)" })）" })" }
 if (-not $kick.enabled -and -not $DryRun -and -not $Force) { Skip 'kick.enabled が false（install.ps1 -EnableKick で有効にする）' }
 
 # 2. auto-resume-global
@@ -157,7 +183,7 @@ if (-not $SkipSystemChecks) {
             $runLog = @()
             if ($run.sessionId -and (Test-Path -LiteralPath $projects)) { $runLog = @(Get-ChildItem -LiteralPath $projects -Recurse -File -Filter "$($run.sessionId).jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1) }
             if ($runLog.Count -gt 0) { $runState = (Get-SessionActivity -Path $runLog[0].FullName -BusyMinutes ([double]$kick.busyMinutes)).State }
-            if ($runState -eq 'working') { Skip "前に起こしたセッションが動いている（pid $($run.pid)、$($run.startedAt) から）" }
+            if ($runState -eq 'working') { Skip "前に起こしたセッションが動いている（pid $($run.pid)、$($run.startedAt) から）" -Retry }
             Write-LoopLog 'kick' "前に起こしたセッションは手が止まっている（$runState、pid $($run.pid)）。数えない"
         }
         elseif (-not $DryRun) { Remove-Item -LiteralPath $runFile -Force -ErrorAction SilentlyContinue }   # 印だけが残っている（再起動など）
@@ -168,7 +194,7 @@ if (-not $SkipSystemChecks) {
         try {
             $info = Get-ScheduledTaskInfo -TaskName 'ClaudeAutoResumeGlobal-Wake' -ErrorAction Stop
             if ($info.NextRunTime) { $script:pcStatus.nextWakeAt = $info.NextRunTime.ToString('yyyy-MM-ddTHH:mm:sszzz') }
-            if ($info.NextRunTime -and $info.NextRunTime -gt (Get-Date)) { Skip "上限の解除待ち（復帰タスクが $($info.NextRunTime.ToString('MM/dd HH:mm')) に登録されている）" }
+            if ($info.NextRunTime -and $info.NextRunTime -gt (Get-Date)) { Skip "上限の解除待ち（復帰タスクが $($info.NextRunTime.ToString('MM/dd HH:mm')) に登録されている）" -Retry }
         }
         catch { }
     }
@@ -184,7 +210,7 @@ if (-not $Force) {
     catch { Write-LoopLog 'kick' "セッションの記録の上限を調べられなかった: $($_.Exception.Message)" }
     if ($limit) {
         $script:pcStatus.limitResetAt = $limit.ResetAt.ToString('yyyy-MM-ddTHH:mm:sszzz')
-        Skip "上限の解除待ち（セッションの記録: $($limit.Kind)、解除 $($limit.ResetAt.ToString('MM/dd HH:mm'))。$($limit.Project) の $($limit.SessionId.Substring(0, [math]::Min(8, $limit.SessionId.Length)))）"
+        Skip "上限の解除待ち（セッションの記録: $($limit.Kind)、解除 $($limit.ResetAt.ToString('MM/dd HH:mm'))。$($limit.Project) の $($limit.SessionId.Substring(0, [math]::Min(8, $limit.SessionId.Length)))）" -Retry
     }
 }
 
@@ -201,7 +227,7 @@ if ($kick.busyMinutes -gt 0) {
         $script:pcStatus.sessions = $counts
         if ($busy.Working.Count -gt 0) {
             $w = $busy.Working[0]
-            Skip "ほかのセッションが動いている（$($w.Project) の $($w.SessionId.Substring(0, [math]::Min(8, $w.SessionId.Length)))、$($kick.busyMinutes) 分の内に作業の記録がある。ほか $($busy.Working.Count - 1) 件）"
+            Skip "ほかのセッションが動いている（$($w.Project) の $($w.SessionId.Substring(0, [math]::Min(8, $w.SessionId.Length)))、$($kick.busyMinutes) 分の内に作業の記録がある。ほか $($busy.Working.Count - 1) 件）" -Retry
         }
         if ($busy.Idle.Count -gt 0) {
             $idleNote = "。手が止まっているセッション $($busy.Idle.Count) 件は数えない（" + (($busy.Idle | Group-Object State | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ') + '）'
@@ -220,7 +246,7 @@ if (Test-Path -LiteralPath $histFile) {
 }
 $script:pcStatus.lastLaunchedAt = $hist.lastLaunchedAt; $script:pcStatus.lastKind = $hist.lastKind
 $since = Get-HoursSince $hist.lastLaunchedAt
-if (-not $Force -and $Trigger -ne 'weekly' -and $null -ne $since -and $since -lt [double]$kick.minIntervalHours) {
+if (-not $Force -and $Trigger -notin @('weekly', 'now') -and $null -ne $since -and $since -lt [double]$kick.minIntervalHours) {
     Skip ("前に起こしてから {0:0.0} 時間（kick.minIntervalHours = {1}）" -f $since, $kick.minIntervalHours)
 }
 
@@ -242,8 +268,18 @@ $inbox = Get-InboxSummary $cfg
 $urgent = @($ready | Where-Object { $_.priority -eq 'urgent' }).Count + $inbox.Urgent
 $summary = "doing=$($doing.Count) 回答あり=$($answered.Count) ready=$($ready.Count) 受付=$($inbox.Count) 緊急=$urgent"
 
+# 即時実行でタスクの指定があれば、そのタスクが着手・再開できるものかを見る（できなければ印を消して見送る）
+$reqTask = ''
+if ($script:request -and $script:request.task) {
+    $rt = @($tasks | Where-Object { $_.id -eq [string]$script:request.task -and $_.status -notin @('done', 'dropped', 'draft') })
+    $rt = @($rt | Where-Object { $_.claimedBy -eq $me -or (-not $_.claimedBy -and (Test-LoopAssignee $me $_.assignee)) })
+    if ($rt.Count -eq 0) { Skip "即時実行の指定のタスク $($script:request.task) は、自分が着手・再開できるものでない（無い・完了・ほかの担当・assignee が違う）" }
+    $reqTask = [string]$script:request.task
+    $summary += " 指定=$reqTask"
+}
+
 $kind = ''
-if ($doing.Count + $answered.Count + $ready.Count + $inbox.Count -gt 0) { $kind = 'work' }
+if ($reqTask -or $doing.Count + $answered.Count + $ready.Count + $inbox.Count -gt 0) { $kind = 'work' }
 elseif ($kick.idle) {
     $defs = @(Get-IdleDefinitions $cfg)
     $due = @($defs | Where-Object { $_.due })
@@ -267,7 +303,7 @@ if ($DryRun) {
 $sessionId = [guid]::NewGuid().ToString()
 $launcher = Join-Path $PSScriptRoot 'kick-session.ps1'
 $shell = if ($arCfg.PSObject.Properties['shellPath'] -and $arCfg.shellPath -and (Test-Path -LiteralPath $arCfg.shellPath)) { [string]$arCfg.shellPath } else { (Get-Process -Id $PID).Path }
-$psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -SessionId $sessionId -Kind $kind"
+$psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -SessionId $sessionId -Kind $kind$(if ($reqTask) { " -Task $reqTask" })"
 $wt = if ($arCfg.PSObject.Properties['terminalPath']) { [string]$arCfg.terminalPath } else { '' }
 if (-not ($wt -and (Test-Path -LiteralPath $wt))) {
     $wtCmd = Get-Command wt.exe -ErrorAction SilentlyContinue
@@ -280,6 +316,7 @@ try {
 catch {
     Write-LoopLog 'kick' "起こせなかった: $($_.Exception.Message)"
     Write-Output "NG 起こせなかった: $($_.Exception.Message)"
+    Complete-Request "起こせなかった: $($_.Exception.Message)" -Keep
     Save-PcStatus 'error' "起こせなかった: $($_.Exception.Message)"
     exit 0
 }
@@ -291,5 +328,6 @@ if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -For
 Write-LoopLog 'kick' "起こした: $kind session=$sessionId（$summary）$pullNote"
 Write-Output "KICK ${kind}: session=$sessionId（$summary）$pullNote"
 $script:pcStatus.lastLaunchedAt = $now; $script:pcStatus.lastKind = $kind
+Complete-Request "起こした: $kind session=$sessionId"
 Save-PcStatus "kick-$kind" "起こした（$summary）"
 exit 0
