@@ -1,4 +1,4 @@
-﻿#requires -Version 7.0
+#requires -Version 7.0
 # auto-loop の共通関数。指令リポジトリ（Markdown + git）を読み書きする
 # 方針: 認証の入力待ちで止まらない / 何もしなかった理由もログに残す / 破壊的な git 操作をしない
 Set-StrictMode -Version 3
@@ -501,6 +501,69 @@ function Find-WeeklyResetFromTranscripts {
     return $latest
 }
 
+# セッションの記録から、直近の上限の窓（5 時間・週）を集める（ダッシュボードの帯。20261121-dashboard-improve）。
+# rateLimitType が five_hour → 'five_hour'、seven_day で始まる（seven_day_overage_included など）→ 'seven_day'。種類と解除時刻ごとに 1 件にまとめ、
+# 解除時刻が Since より後のものを、解除時刻の古い順に最大 Max 件返す。startsAt は解除時刻から窓の長さを引いた推定（窓の始まりは記録に無い）。
+# hit は、その窓で上限に当たった（status が rejected の）記録があったか。Since（FilesSince があればそれ）より後に書かれた記録だけを読む
+function Find-LimitWindows {
+    param([string]$ProjectsDir, [datetime]$Since, [int]$Max = 30, [Nullable[datetime]]$FilesSince = $null)
+    if (-not $ProjectsDir -or -not (Test-Path -LiteralPath $ProjectsDir)) { return @() }
+    $fs = if ($null -ne $FilesSince -and $FilesSince -gt $Since) { $FilesSince } else { $Since }
+    $files = @(Get-ChildItem -LiteralPath $ProjectsDir -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $fs })
+    if ($files.Count -eq 0) { return @() }
+    $sinceUnix = ([DateTimeOffset]$Since).ToUnixTimeSeconds()
+    $byKey = @{}
+    foreach ($m in @($files | Select-String -Pattern '\{[^{}]*"rateLimitType"\s*:\s*"(five_hour|seven_day)[^"]*"[^{}]*\}' -AllMatches -ErrorAction SilentlyContinue)) {
+        foreach ($x in $m.Matches) {
+            $r = [regex]::Match($x.Value, '"resetsAt"\s*:\s*(\d+)')
+            if (-not $r.Success) { continue }
+            $reset = [long]$r.Groups[1].Value
+            if ($reset -le $sinceUnix) { continue }
+            $kind = if ($x.Groups[1].Value -eq 'five_hour') { 'five_hour' } else { 'seven_day' }
+            $hit = $x.Value -match '"status"\s*:\s*"rejected"'
+            $key = "$kind/$reset"
+            if ($byKey.ContainsKey($key)) { if ($hit) { $byKey[$key].Hit = $true } }
+            else { $byKey[$key] = @{ Kind = $kind; Reset = $reset; Hit = $hit } }
+        }
+    }
+    $fmt = 'yyyy-MM-ddTHH:mm:sszzz'
+    return @($byKey.Values | Sort-Object { $_.Reset }, { $_.Kind } | Select-Object -Last $Max | ForEach-Object {
+            $resetAt = [DateTimeOffset]::FromUnixTimeSeconds($_.Reset).ToLocalTime()
+            $len = if ($_.Kind -eq 'five_hour') { [TimeSpan]::FromHours(5) } else { [TimeSpan]::FromDays(7) }
+            [ordered]@{ kind = $_.Kind; startsAt = $resetAt.Subtract($len).ToString($fmt); resetsAt = $resetAt.ToString($fmt); hit = [bool]$_.Hit }
+        })
+}
+
+# 上限の窓を、前回の結果（state/kick-limits.json）に、前回から書かれた記録の分だけを足して返す（記録の全部を毎回読むと数十秒かかるため）。
+# 解除時刻が Days 日より前のものは捨てる。NoSave なら結果を保存しない（DryRun）
+function Update-LimitWindows {
+    param([string]$ProjectsDir, [int]$Days = 7, [switch]$NoSave)
+    $file = Join-Path (Get-LoopHome) 'state/kick-limits.json'
+    $now = [datetime]::Now
+    $since = $now.AddDays(-$Days)
+    $prev = @(); $filesSince = $null
+    if (Test-Path -LiteralPath $file) {
+        try {
+            $c = Read-LoopText $file | ConvertFrom-Json
+            $filesSince = [datetimeoffset]::Parse([string]$c.scannedAt).LocalDateTime.AddMinutes(-5)   # 書き込みの途中だった記録を取りこぼさないよう、少し重ねる
+            $prev = @($c.windows | Where-Object { $_ } | ForEach-Object { [ordered]@{ kind = [string]$_.kind; startsAt = [string]$_.startsAt; resetsAt = [string]$_.resetsAt; hit = [bool]$_.hit } })
+        }
+        catch { $prev = @(); $filesSince = $null }
+    }
+    $new = @(Find-LimitWindows -ProjectsDir $ProjectsDir -Since $since -FilesSince $filesSince)
+    $byKey = [ordered]@{}
+    foreach ($w in @($prev + $new)) {
+        try { if ([datetimeoffset]::Parse($w.resetsAt).LocalDateTime -le $since) { continue } } catch { continue }
+        $key = "$($w.kind)/$([datetimeoffset]::Parse($w.resetsAt).ToUnixTimeSeconds())"
+        if ($byKey.Contains($key)) { if ($w.hit) { $byKey[$key].hit = $true } } else { $byKey[$key] = $w }
+    }
+    $list = @($byKey.Values | Sort-Object { [datetimeoffset]::Parse($_.resetsAt) }, { $_.kind } | Select-Object -Last 30)
+    if (-not $NoSave) {
+        New-Item -ItemType Directory -Force (Split-Path -Parent $file) | Out-Null
+        Write-LoopText $file ((@{ scannedAt = $now.ToString('yyyy-MM-ddTHH:mm:sszzz'); windows = $list } | ConvertTo-Json -Depth 4) + "`n")
+    }
+    return $list
+}
 # 'Thu 08:00' のような書き方を、直近の過去のその曜日・時刻（DateTime）にする。読めなければ $null
 function ConvertFrom-WeeklyText {
     param([string]$Text, [datetime]$Now = (Get-Date))

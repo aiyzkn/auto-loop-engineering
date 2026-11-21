@@ -85,7 +85,7 @@ next = 次にやることを 1 つ決める（再開 / 緊急への切り替え 
 3. やること（担当中の `doing`・回答の届いた `waiting` / `blocked`・自分に合う `ready`・受付の未整理）があれば `work`、無ければ手が空いたときの作業（`idle`。24 時間に 1 回まで。定義がすべて実施済みなら起こさない）として、新しいウィンドウで `claude` を起こし、`/auto-loop next` を実行させる
 4. 起こしたセッションは、記録が 60 分のあいだ書かれなければ終わらせる（対話のセッションは自分では終わらず、PC が眠れないため）。続きは、次に起こされたセッションがタスクファイルを読んで行う
 
-判断と理由は `~/.claude/auto-loop/logs/auto-loop.log` の `[kick]` の行に残る。あわせて、指令リポジトリの `state/pcs/<ID>.json` に PC の状況（最後の判断・理由・手を動かしている / 止まっているセッションの数・次の復帰・週次の起動の時刻）が書かれる（自動起動を有効にした PC だけ。中身が変わったときか 60 分ごと）。数値は `config.json` の `kick` で変えられる（`references/setup.md`）。止めるときは `install.ps1 -NoCopy -DisableKick`。
+判断と理由は `~/.claude/auto-loop/logs/auto-loop.log` の `[kick]` の行に残る。あわせて、指令リポジトリの `state/pcs/<ID>.json` に PC の状況（最後の判断・理由・手を動かしている / 止まっているセッションの数・次の復帰・週次の起動の時刻・直近 7 日の上限の窓 `limits`）が書かれる（自動起動を有効にした PC だけ。中身が変わったときか 60 分ごと）。数値は `config.json` の `kick` で変えられる（`references/setup.md`）。止めるときは `install.ps1 -NoCopy -DisableKick`。
 
 分岐したセッションは ID が変わる。scratchpad も変わる。止まったサブエージェントに続きを頼めないことがある。いずれも、タスクファイルと `~/.claude/auto-loop/work/<タスク ID>/` と作業ツリーの実物から立て直す。
 
