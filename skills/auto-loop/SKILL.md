@@ -15,7 +15,7 @@ description: "ループエンジニアリング（長時間・複数案件の作
 | 　受付 / 名簿 / 承認の境界 / 決まり | `inbox.md` / `roster.md` / `policy.md` / `AGENTS.md` |
 | 　案件の定義 / タスク（= 状態ファイル）/ 完了 | `projects/<案件>/project.md` / `tasks/<ID>.md` / `archive/<ID>.md` |
 | この PC の設定（エージェントの ID・各リポジトリの clone の場所） | `~/.claude/auto-loop/config.json` |
-| この PC で進行中の印（再開のときに使う） | `~/.claude/auto-loop/state/active/<タスク ID>.json` |
+| この PC で進行中の印（再開のときに使う） | `~/.claude/auto-loop/state/active/<案件>--<タスク ID>.json` |
 | セッションをまたいで使う補助ファイル（scratchpad の代わり） | `~/.claude/auto-loop/work/<タスク ID>/` |
 | ログ（何もしなかった理由も残る） | `~/.claude/auto-loop/logs/auto-loop.log` |
 | スクリプト（以下 `<scripts>`） | このスキルの `scripts/`（導入先は `~/.claude/skills/auto-loop/scripts/`） |
