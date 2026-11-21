@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
   auto-loop のスクリプトの通し試験。一時フォルダに「リモート（bare）+ エージェント 2 つ分の clone」を作って確かめる。
@@ -487,6 +487,115 @@ try {
     $lw2 = @(Update-LimitWindows -ProjectsDir $limProj -Days 7)
     Check '上限の窓: 前回の結果に、新しい記録の分を足す' ($lw2.Count -eq 3 -and @($lw2 | Where-Object { $_.kind -eq 'five_hour' }).Count -eq 2 -and (Test-Path (Join-Path $root 'home-lim/state/kick-limits.json'))) ($lw2 | ConvertTo-Json)
     $env:AUTO_LOOP_HOME = $oldHome
+
+    Write-Output '10d. 判断待ち・完了で終わらせる見張り（close-watch.ps1。Windows だけ）'
+    if (-not $IsWindows) { Write-Output '  skip Windows ではない' }
+    else {
+        Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
+        $oldSidW = $env:CLAUDE_CODE_SESSION_ID; $oldPidW = $env:CLAUDE_PID
+        $env:CLAUDE_CODE_SESSION_ID = $null; $env:CLAUDE_PID = $null     # 印にセッションを書かない（試験を流すセッションのものにしない）
+        $hostsW = @()
+        # claude の代わりに ping を子に持つシェル（見張りは子だけを終わらせ、シェルは自分で終わる）
+        $newHost = {
+            $h = Start-Process -FilePath 'pwsh' -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command', '& ping.exe -n 120 127.0.0.1 | Out-Null')
+            for ($w = 0; $w -lt 50 -and -not @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($h.Id)" | Where-Object Name -eq 'PING.EXE').Count; $w++) { Start-Sleep -Milliseconds 100 }
+            $h
+        }
+        try {
+            $nw = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '試験: 見張り', '-Slug', 'closewatch', '-Stage', 'implement')
+            $idW = (($nw.Text -split "`n")[0] -replace '^OK ', '').Trim()
+            Run 'a' 'sync.ps1' @('-Message', 'intake closewatch') | Out-Null
+            $cw0 = Run 'a' 'claim.ps1' @('claim', $idW)
+            New-Item -ItemType Directory -Force (Join-Path $projFake 'p3') | Out-Null
+            $sidK = 'cw-k-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+            $kFile = Join-Path $projFake "p3/$sidK.jsonl"
+            $recClaim = '{"parentUuid":"h","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"PowerShell","input":{"command":"pwsh -NoProfile -File \"C:\\x\\claim.ps1\" claim ' + $idW + ' -Note \"着手\""}}]}}'
+            $recMention = '{"parentUuid":"i","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"例: claim.ps1 heartbeat 20991231-other"}]}}'
+            [IO.File]::WriteAllText($kFile, "$recUser`n$recClaim`n$recMention`n$recDone`n", $utf8)
+            (Get-Item $kFile).LastWriteTime = (Get-Date).AddMinutes(-10)
+            $refs = @(Get-SessionTaskRefs @($kFile))
+            Check '記録から、claim.ps1 で触れたタスクを拾う（文中の例は拾わない）' ($cw0.Code -eq 0 -and $refs.Count -eq 1 -and $refs[0] -eq $idW) "$($cw0.Text) / $($refs -join ',')"
+            $h1 = & $newHost; $hostsW += $h1
+            $w1 = Run 'a' 'close-watch.ps1' @('-SessionId', $sidK, '-HostPid', $h1.Id, '-Once')
+            Check '担当中（doing）のタスクがあれば終わらせない' ($w1.Text -match "KEEP waiting-input（担当中: $([regex]::Escape($idW))=doing" -and -not $h1.HasExited) $w1.Text
+            Run 'a' 'claim.ps1' @('heartbeat', $idW, '-Status', 'waiting', '-Note', '判断待ち') | Out-Null
+            (Get-Item $kFile).LastWriteTime = (Get-Date).AddMinutes(-1)
+            $w2 = Run 'a' 'close-watch.ps1' @('-SessionId', $sidK, '-HostPid', $h1.Id, '-Once')
+            Check '入力待ちになって間もなければ（settledCloseMinutes の内）終わらせない' ($w2.Text -match 'KEEP waiting-input（1\.\d 分）' -and -not $h1.HasExited) $w2.Text
+            (Get-Item $kFile).LastWriteTime = (Get-Date).AddMinutes(-10)
+            $sidR = 'cw-r-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+            $rFile = Join-Path $projFake "p3/$sidR.jsonl"
+            [IO.File]::WriteAllText($rFile, "$recUser`n$recDone`n", $utf8)
+            (Get-Item $rFile).LastWriteTime = (Get-Date).AddMinutes(-10)
+            $w3 = Run 'a' 'close-watch.ps1' @('-SessionId', $sidR, '-HostPid', $h1.Id, '-Source', 'resume', '-Once')
+            Check '再開したセッションは、auto-loop のタスクに触れていなければ終わらせない' ($w3.Text -match 'KEEP waiting-input（auto-loop のタスクに触れていない）' -and -not $h1.HasExited) $w3.Text
+            # 判断待ちになった → 別のプロセスの見張り（Start-CloseWatch）が claude（ping）を終わらせ、シェルも終わる
+            Start-CloseWatch -SessionId $sidK -HostPid $h1.Id -Source kick -IntervalSeconds 1 | Out-Null
+            $h1.WaitForExit(30000) | Out-Null
+            $lockW = Join-Path $root "home-a/state/close-watch/$sidK.json"
+            for ($w = 0; $w -lt 100 -and (Test-Path $lockW); $w++) { Start-Sleep -Milliseconds 100 }
+            $logW = Get-Content (Join-Path $root 'home-a/logs/auto-loop.log') -Raw
+            Check '判断待ちになれば、見張りが claude を終わらせ、シェルも終わる（ログ・印の片付け）' ($h1.HasExited -and $logW -match "閉じた: kick session=$([regex]::Escape($sidK.Substring(0, 8))) host=\d+ settled-close.*$([regex]::Escape($idW))=waiting.*PING\.EXE" -and $logW -match '見張りを始めた: kick' -and -not (Test-Path $lockW)) (($logW -split "`n" | Select-String 'close-watch') -join "`n")
+            # 再開したセッション: 印が再開元の ID のままなら自分のもの、別のセッションの印なら自分のものとしない
+            Run 'a' 'claim.ps1' @('heartbeat', $idW, '-Status', 'doing', '-Note', '再開') | Out-Null
+            $mkW = Join-Path $root "home-a/state/active/demo--$idW.json"
+            $setOwner = { param($Sid) $mk = Get-Content $mkW -Raw | ConvertFrom-Json; $mk | Add-Member -NotePropertyName sessionId -NotePropertyValue $Sid -Force; [IO.File]::WriteAllText($mkW, ($mk | ConvertTo-Json), $utf8) }
+            & $setOwner 'cw-parent'
+            [IO.File]::WriteAllText($rFile, "$recUser`n$recClaim`n$recDone`n", $utf8)
+            (Get-Item $rFile).LastWriteTime = (Get-Date).AddMinutes(-10)
+            $h2 = & $newHost; $hostsW += $h2
+            $w4 = Run 'a' 'close-watch.ps1' @('-SessionId', $sidR, '-HostPid', $h2.Id, '-Source', 'resume', '-ParentSessionId', 'cw-parent', '-Once')
+            & $setOwner 'cw-other'
+            $w5 = Run 'a' 'close-watch.ps1' @('-SessionId', $sidR, '-HostPid', $h2.Id, '-Source', 'resume', '-ParentSessionId', 'cw-parent', '-Once')
+            Check '再開元の ID の印は自分のもの、別のセッションの印は自分のものとしない' ($w4.Text -match 'KEEP waiting-input（担当中' -and $w5.Text -match '(?m)^CLOSE settled-close') "$($w4.Text)`n$($w5.Text)"
+            $h2.WaitForExit(10000) | Out-Null
+            Check '終わらせればシェルも終わる（再開のセッション）' $h2.HasExited
+            # 記録が書かれない（自動起動のセッションだけ。見張りの開始から数える）
+            $iFile = Join-Path $projFake 'p3/cw-i.jsonl'
+            [IO.File]::WriteAllText($iFile, "$recUser`n$recTool`n", $utf8)
+            (Get-Item $iFile).LastWriteTime = (Get-Date).AddMinutes(-90)
+            $env:AUTO_LOOP_HOME = Join-Path $root 'home-a'
+            $cfgW = Get-LoopConfig
+            $dk = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-90)
+            $dr = Get-CloseDecision -Config $cfgW -Source resume -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-90)
+            $dn = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-5)
+            Check '記録が idleCloseMinutes 分書かれなければ、自動起動のセッションだけ終わらせる' ($dk.Close -and $dk.Reason -match '^idle-close' -and -not $dr.Close -and -not $dn.Close) "$($dk.Reason) / $($dr.Reason) / $($dn.Reason)"
+            # 開いているセッションは、別のセッションの起動のたびに時刻の無いメタデータの行を書き足す（ファイルの更新時刻が新しくなる）。
+            # 最後の時刻つきの行で数える（2026-11-21 の本番で、60 分の見張りが一度も働かなかった原因）
+            $tsOld = (Get-Date).AddMinutes(-90).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+            $mFile = Join-Path $projFake 'p3/cw-m.jsonl'
+            [IO.File]::WriteAllText($mFile, ($recUser -replace '^\{', ('{"timestamp":"' + $tsOld + '",')) + "`n" + ($recDone -replace '^\{', ('{"timestamp":"' + $tsOld + '",')) + "`n" + '{"type":"ai-title","aiTitle":"x","sessionId":"cw-m"}' + "`n" + '{"type":"bridge-session","sessionId":"cw-m"}' + "`n", $utf8)
+            $am = Get-SessionActivity -Path $mFile
+            $dm = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-m') -TranscriptPaths @($mFile) -WatchStartedAt (Get-Date).AddMinutes(-90)
+            Check '記録の更新時刻ではなく、最後の時刻つきの行で数える（メタデータの書き足しで見張りがのびない）' ($am.State -eq 'waiting-input' -and ((Get-Date) - $am.LastWrite).TotalMinutes -gt 85 -and $dm.Close -and $dm.Reason -match '^idle-close') "$($am.LastWrite) / $($dm.Reason)"
+            Remove-Item $mFile -Force
+            $de = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-none') -TranscriptPaths @() -WatchStartedAt (Get-Date)
+            Check '記録がまだ無ければ、終わらせずに待つ（起動の直後）' (-not $de.Close -and $de.State -eq 'empty') $de.Reason
+            # 再開したセッションの一覧（auto-resume-global の state/running の印。pid が動いているものだけ）
+            $h3 = & $newHost; $hostsW += $h3
+            $runW = Join-Path $arFake 'state/running'; New-Item -ItemType Directory -Force $runW | Out-Null
+            [IO.File]::WriteAllText((Join-Path $runW 'live.json'), (@{ sessionId = 'live'; parentSessionId = 'p0'; pid = $h3.Id; startedAt = (Get-Date).ToString('o') } | ConvertTo-Json), $utf8)
+            [IO.File]::WriteAllText((Join-Path $runW 'gone.json'), (@{ sessionId = 'gone'; pid = $h2.Id; startedAt = (Get-Date).ToString('o') } | ConvertTo-Json), $utf8)
+            $rsW = @(Get-ResumedSessions $arFake)
+            Check '再開したセッションは、印のうち pid が動いているものだけ' ($rsW.Count -eq 1 -and $rsW[0].SessionId -eq 'live' -and $rsW[0].ParentSessionId -eq 'p0') ($rsW | Out-String)
+            $kd = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+            Check 'DryRun で、見張りを付ける再開のセッションを表示する' ($kd.Text -match 'INFO 再開したセッション live') $kd.Text
+            # 印の時刻は ConvertFrom-Json で DateTime になる。ISO 8601 に戻して渡し、見張りが引数の誤りで止まらない
+            Start-CloseWatch -SessionId 'live' -HostPid $h3.Id -Source resume -ParentSessionId 'p0' -HostStartedAt $rsW[0].StartedAt -IntervalSeconds 1 | Out-Null
+            $startedW = $false
+            for ($w = 0; $w -lt 100 -and -not $startedW; $w++) { Start-Sleep -Milliseconds 100; $startedW = (Get-Content (Join-Path $root 'home-a/logs/auto-loop.log') -Raw) -match '見張りを始めた: resume session=live' }
+            Check '再開の印の時刻を渡しても、見張りが動き始める' ($startedW -and $rsW[0].StartedAt -match '^\d{4}-\d\d-\d\dT' -and (Test-CloseWatchRunning 'live')) $rsW[0].StartedAt
+            $kd2 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+            Check '見張りが動いていれば、付け直さない' ($kd2.Text -notmatch 'INFO 再開したセッション live') $kd2.Text
+            Remove-Item $runW -Recurse -Force
+            Remove-Item $kFile, $rFile, $iFile -Force
+            Run 'a' 'claim.ps1' @('release', $idW, '-Status', 'done', '-Note', '試験の後始末') | Out-Null
+        }
+        finally {
+            foreach ($h in $hostsW) { if (-not $h.HasExited) { & taskkill.exe /PID $h.Id /T /F 2>&1 | Out-Null } }
+            $env:CLAUDE_CODE_SESSION_ID = $oldSidW; $env:CLAUDE_PID = $oldPidW
+        }
+    }
 
     Write-Output '11. 手が空いた時のタスク（リモートの無い指令リポジトリ）'
     $c = Join-Path $root 'ctl-c'

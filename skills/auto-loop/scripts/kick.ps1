@@ -18,6 +18,8 @@
   起こしたセッションは /auto-loop next を実行する（指令リポジトリの AGENTS.md「7. 着手の順」）。
   あわせて、kick.weeklyAtReset が true なら、週の上限の解除時刻（記録の resetsAt か kick.weeklyResetAt）を調べ、
   タスク AutoLoopKickWeekly の時刻が違っていれば登録し直す（1 の前に行う。DryRun では表示だけ）。
+  2 のあと、auto-resume-global が再開して動いているセッション（state/running/<ID>.json）に、判断待ち・完了で終わらせる見張り（close-watch.ps1）を付ける
+  （kick.settledCloseResumed。付いていないものだけ。DryRun では表示だけ）。
   判断のたびに、PC の状況を指令リポジトリの state/pcs/<agentId>.json に書く（kick.enabled のときだけ。中身が変わったときか
   kick.statusEveryMinutes 分ごと。このファイルだけをコミットし、ほかの変更が無いときだけ push する。ダッシュボードが読む）。
   PC の状況には、直近 7 日の上限の窓（limits: 種類 five_hour / seven_day・推定の開始・解除時刻・当たったか）も載せる（セッションの記録から。state/kick-limits.json に前回の結果を残し、差分だけ読む）。
@@ -129,13 +131,28 @@ if (-not (Test-Path -LiteralPath $arCfgFile)) { Skip "auto-resume-global が導�
 if (Test-Path -LiteralPath (Join-Path $arHome 'disabled')) { Skip 'auto-resume-global が停止中（disabled がある）' }
 $arCfg = [IO.File]::ReadAllText($arCfgFile, $utf8) | ConvertFrom-Json
 
+# 2a. auto-resume-global が再開したセッション（state/running/<ID>.json の印）に、判断待ち・完了で終わらせる見張りを付ける。
+#     自動起動のセッションには kick-session.ps1 が付ける。auto-loop のタスクに触れていない再開のセッションは、見張りが終わらせない
+if ($kick.settledCloseMinutes -gt 0 -and $kick.settledCloseResumed -and ($IsWindows -or $DryRun)) {
+    foreach ($rs in @(Get-ResumedSessions $arHome)) {
+        $rs8 = $rs.SessionId.Substring(0, [math]::Min(8, $rs.SessionId.Length))
+        if (Test-CloseWatchRunning $rs.SessionId) { continue }
+        if ($DryRun) { Write-Output "INFO 再開したセッション $rs8（pid $($rs.Pid)）に見張りを付ける対象"; continue }
+        try {
+            Start-CloseWatch -SessionId $rs.SessionId -HostPid $rs.Pid -Source resume -ParentSessionId $rs.ParentSessionId -HostStartedAt $rs.StartedAt | Out-Null
+            Write-LoopLog 'kick' "再開したセッション $rs8（pid $($rs.Pid)）に、判断待ち・完了で終わらせる見張りを付けた"
+        }
+        catch { Write-LoopLog 'kick' "再開したセッション $rs8 に見張りを付けられなかった: $($_.Exception.Message)" }
+    }
+}
+
 # 3. 動いているセッション
 if (-not $SkipSystemChecks) {
     if (Test-Path -LiteralPath $runFile) {
         $run = $null
         try { $run = [IO.File]::ReadAllText($runFile, $utf8) | ConvertFrom-Json } catch { }
         if ($run -and (Test-Pid $run.pid ([string]$run.startedAt))) {
-            # 動いていても、手が止まっている（入力待ちなど）なら数えない。そのウィンドウは kick-session.ps1 の見張りが終わらせる
+            # 動いていても、手が止まっている（入力待ちなど）なら数えない。そのウィンドウは見張り（close-watch.ps1）が終わらせる
             $runState = 'working'
             $runLog = @()
             if ($run.sessionId -and (Test-Path -LiteralPath $projects)) { $runLog = @(Get-ChildItem -LiteralPath $projects -Recurse -File -Filter "$($run.sessionId).jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1) }

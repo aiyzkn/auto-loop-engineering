@@ -293,6 +293,8 @@ function Get-KickConfig {
         idleMinIntervalHours = 24       # 手が空いたときの作業のために起こす間隔
         busyMinutes          = 15       # 作業中のセッション（入力待ちでないもの）の記録がこの分の内に書かれていれば、起こさない（0 なら見ない）
         idleCloseMinutes     = 60       # 起こしたセッションの記録がこの分のあいだ書かれなければ、終わらせる（0 なら終わらせない）
+        settledCloseMinutes  = 5        # 入力待ちがこの分続き、担当したタスクが判断待ち・完了などになったら、セッションとウィンドウを終わらせる（0 なら終わらせない。close-watch.ps1）
+        settledCloseResumed  = $true    # auto-resume-global が再開したセッションも、上と同じ条件で終わらせる（auto-loop のタスクに触れたものだけ）
         intervalMinutes      = 0        # この分ごとにも kick.ps1 を起動する（0 なら使わない。15・30 など）。起こすかどうかは同じ判断
         weeklyAtReset        = $true    # 週の上限の解除時刻（の 6 分後）に、毎週 PC を起こして kick.ps1 を起動する（タスク AutoLoopKickWeekly）
         weeklyResetAt        = ''       # 週の解除の曜日・時刻を手で決める（例 'Thu 08:00'）。空なら、セッションの記録の週の上限の resetsAt から取る
@@ -325,6 +327,17 @@ function Read-SessionTailLines {
     return , $lines
 }
 
+# 記録の時刻（ConvertFrom-Json が DateTime に変えたもの・ISO 8601 の文字列）を、この PC の時刻にする。読めなければ $null
+function ConvertTo-LocalTime {
+    param($Value)
+    try {
+        if ($Value -is [datetime]) { return $(if ($Value.Kind -eq [DateTimeKind]::Utc) { $Value.ToLocalTime() } else { $Value }) }
+        if ($Value -is [datetimeoffset]) { return $Value.LocalDateTime }
+        return [datetimeoffset]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture).LocalDateTime
+    }
+    catch { return $null }
+}
+
 # セッションが「手を動かしているか」を、最後の会話の記録から判定する（kick.ps1 の 1 台 1 セッションの数え方。依頼 20261119-autoresume-fix-idle-dashboard）。
 #   empty         会話の記録が無い（起動したが何も指示されていない）
 #   limit         最後が利用上限の記録（解除待ち。kick.ps1 は復帰タスクで別に見る）
@@ -333,22 +346,28 @@ function Read-SessionTailLines {
 #   stale         working の形だが、BusyMinutes 分より長く書かれていない（権限の確認待ち・異常終了など。長いツールの実行もここに入りうる）
 # 利用者の入力ではない user の記録（サブエージェントの通知・isMeta など）と、サブエージェント側の記録（isSidechain）は飛ばす。
 # 記録の形は Claude Code の内部形式（2026-11 時点）。版が変わったら実物に合わせて直す
+# LastWrite は、本体の記録の最後の時刻つきの行（timestamp）の時刻と、サブエージェントの記録の更新時刻の遅いほう。
+# 本体のファイルの更新時刻は使わない。開いているセッションは、同じ PC で別のセッションが起動するたびに、時刻の無いメタデータの行
+# （last-prompt・ai-title・bridge-session など）を書き足すので、手が止まっていても更新時刻が新しくなる（2026-11-21 に実物で確かめた）。
+# 時刻つきの行が無い記録（古い形・試験）は、ファイルの更新時刻を使う
 function Get-SessionActivity {
     param([string]$Path, [double]$BusyMinutes = 15)
     $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
     if (-not $item) { return [pscustomobject]@{ State = 'empty'; LastWrite = $null; Path = $Path } }
-    $lastWrite = $item.LastWriteTime
+    $subWrite = $null
     $sub = Join-Path $item.DirectoryName ([IO.Path]::GetFileNameWithoutExtension($item.Name))
     if (Test-Path -LiteralPath $sub) {
         $s = Get-ChildItem -LiteralPath $sub -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($s -and $s.LastWriteTime -gt $lastWrite) { $lastWrite = $s.LastWriteTime }
+        if ($s) { $subWrite = $s.LastWriteTime }
     }
     $state = 'empty'
+    $stamp = $null
     $lines = Read-SessionTailLines $Path
     for ($i = $lines.Count - 1; $i -ge 0; $i--) {
         $l = $lines[$i].TrimEnd("`r")
         if (-not $l.StartsWith('{')) { continue }
         try { $r = $l | ConvertFrom-Json } catch { continue }
+        if (-not $stamp -and $r.PSObject.Properties['timestamp'] -and $r.timestamp) { $stamp = ConvertTo-LocalTime $r.timestamp }
         if ($r.type -notin @('user', 'assistant')) { continue }
         if ($r.PSObject.Properties['isSidechain'] -and $r.isSidechain) { continue }
         if ($r.type -eq 'user') {
@@ -366,6 +385,8 @@ function Get-SessionActivity {
         $state = if ($tool.Count -gt 0) { 'working' } else { 'waiting-input' }
         break
     }
+    $lastWrite = if ($stamp) { $stamp } else { $item.LastWriteTime }
+    if ($subWrite -and $subWrite -gt $lastWrite) { $lastWrite = $subWrite }
     if ($state -eq 'working' -and ((Get-Date) - $lastWrite).TotalMinutes -gt $BusyMinutes) { $state = 'stale' }
     return [pscustomobject]@{ State = $state; LastWrite = $lastWrite; Path = $Path }
 }
@@ -954,6 +975,169 @@ function Test-SessionLive {
     }
     $state = (Get-SessionActivity -Path $log -BusyMinutes $BusyMinutes).State
     return [pscustomobject]@{ Live = ($state -in @('working', 'stale')); Reason = $state; SessionId = $sid }
+}
+
+# ---- 判断待ち・完了になったセッションを終わらせる見張り（close-watch.ps1。2026-11-21） ----
+
+# JSON から読んだ時刻を ISO 8601 の文字列にする。PowerShell 7 の ConvertFrom-Json は ISO 8601 の文字列を DateTime に変えるので、
+# そのまま [string] にすると「11/21/2026 07:33:41」（空白を含み、カルチャによっては読めない）になる
+function ConvertTo-IsoTime {
+    param($Value)
+    if ($Value -is [datetime]) { return $Value.ToString('o') }
+    if ($Value -is [datetimeoffset]) { return $Value.ToString('o') }
+    return [string]$Value
+}
+
+# 指定の pid のプロセスが動いていて、StartedAt（ISO 8601 か DateTime。空なら見ない）より前から動いているか（pid の使い回しを取り違えない）
+function Test-HostProcess {
+    param([int]$ProcessId, $StartedAt = '')
+    if ($ProcessId -le 0) { return $false }
+    $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $p) { return $false }
+    try { if ($p.HasExited) { return $false } } catch { }
+    $at = ConvertTo-IsoTime $StartedAt
+    if (-not $at) { return $true }
+    try { return ($p.StartTime -le [datetimeoffset]::Parse($at, [Globalization.CultureInfo]::InvariantCulture).LocalDateTime.AddMinutes(1)) } catch { return $true }
+}
+
+# セッションの記録（本体の .jsonl）の場所。無ければ空
+function Find-SessionTranscript {
+    param([string]$SessionId, [string]$ProjectsDir = (Get-ClaudeProjectsDir))
+    if (-not $SessionId -or -not (Test-Path -LiteralPath $ProjectsDir)) { return '' }
+    foreach ($d in @(Get-ChildItem -LiteralPath $ProjectsDir -Directory -ErrorAction SilentlyContinue)) {
+        $f = Join-Path $d.FullName "$SessionId.jsonl"
+        if (Test-Path -LiteralPath $f) { return $f }
+    }
+    return ''
+}
+
+# セッションが claim.ps1 で触れたタスクの ID（担当の主張・印・解放・引き継ぎ）。ツールの呼び出し（tool_use）の行だけを見る
+# （読み込んだ手順書の例や、応答の文中に書いた ID は拾わない）
+function Get-SessionTaskRefs {
+    param([string[]]$Paths)
+    $ids = [Collections.Generic.List[string]]::new()
+    $re = 'claim\.ps1(?:\\"|"|'')?\s+(?:claim|heartbeat|release|takeover)\s+(?:\\"|"|'')?(\d{8}-[A-Za-z0-9][A-Za-z0-9._-]*)'
+    foreach ($p in @($Paths)) {
+        if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
+        foreach ($l in (Read-SessionTailLines $p -MaxBytes 256MB)) {
+            if ($l.IndexOf('claim.ps1') -lt 0 -or $l.IndexOf('"tool_use"') -lt 0) { continue }
+            foreach ($m in [regex]::Matches($l, $re)) { $id = $m.Groups[1].Value; if (-not $ids.Contains($id)) { $ids.Add($id) } }
+        }
+    }
+    return $ids.ToArray()
+}
+
+# TaskIds のうち、このセッション（SessionIds のどれか）がまだ手に持っているもの（自分が担当で、状態が判断待ち・完了などでない）。
+# 進行中の印が別のセッションのものなら、そのセッションのものとして数えない。読めなければ $null（終わらせない側に倒す）
+function Get-HeldTasks {
+    param($Config, [string[]]$TaskIds, [string[]]$SessionIds)
+    $me = [string]$Config.agentId
+    $settled = @('waiting', 'blocked', 'done', 'dropped', 'ready')
+    try { $all = @(Get-LoopTasks $Config); $marks = @(Get-ActiveMarks) } catch { return $null }
+    $held = @(); $seen = @()
+    foreach ($id in @($TaskIds)) {
+        # 別の案件に同じ ID があれば、どれも見る（記録の claim.ps1 の呼び出しからは、案件まで分からないことがある）
+        $ts = @($all | Where-Object { $_.id -eq $id })
+        if ($ts.Count -eq 0) { $seen += "$id=保管済み"; continue }
+        foreach ($t in $ts) {
+            $seen += $(if ($ts.Count -gt 1) { "$($t.project)/$id=$($t.status)" } else { "$id=$($t.status)" })
+            if ($t.claimedBy -ne $me -or $t.status -in $settled) { continue }
+            $owner = ''
+            $m = @($marks | Where-Object { [string]$_.project -eq $t.project -and [string]$_.task -eq $id }) | Select-Object -First 1
+            if ($m -and $m.PSObject.Properties['sessionId'] -and $m.sessionId) { $owner = [string]$m.sessionId }
+            if ($owner -and $owner -notin @($SessionIds)) { continue }   # 同じ PC の別のセッションが持っている
+            $held += $t
+        }
+    }
+    return [pscustomobject]@{ Held = $held; Summary = ($seen -join ' ') }
+}
+
+# 見張りの 1 回分の判断。戻り値の Close が true なら終わらせる。Note は見送りの理由・状態（ログ用）
+#   kick（自動起動のセッション）: 記録が idleCloseMinutes 分のあいだ書かれない、
+#                                 または入力待ちが settledCloseMinutes 分続き、手に持っているタスクが無い（何も担当しなかったときも含む）
+#   resume（auto-resume-global が再開したセッション）: 入力待ちが settledCloseMinutes 分続き、claim.ps1 で触れたタスクがあって、
+#                                 そのどれも手に持っていない（auto-loop のタスクに触れていないセッションは終わらせない）
+function Get-CloseDecision {
+    param($Config, [ValidateSet('kick', 'resume')][string]$Source, [string[]]$SessionIds, [string[]]$TranscriptPaths,
+        [datetime]$WatchStartedAt, [datetime]$Now = (Get-Date))
+    $kick = Get-KickConfig $Config
+    $main = if (@($TranscriptPaths).Count) { [string]@($TranscriptPaths)[0] } else { '' }
+    $state = 'empty'; $lastWrite = $WatchStartedAt
+    if ($main -and (Test-Path -LiteralPath $main)) {
+        $a = Get-SessionActivity -Path $main -BusyMinutes ([double]$kick.busyMinutes)
+        $state = $a.State; if ($a.LastWrite) { $lastWrite = $a.LastWrite }
+    }
+    $quiet = ($Now - $lastWrite).TotalMinutes
+    $idle = ($Now - $(if ($lastWrite -gt $WatchStartedAt) { $lastWrite } else { $WatchStartedAt })).TotalMinutes
+    $r = { param($Close, $Reason) [pscustomobject]@{ Close = [bool]$Close; Reason = $Reason; State = $state } }
+    if ($Source -eq 'kick' -and [double]$kick.idleCloseMinutes -gt 0 -and $idle -ge [double]$kick.idleCloseMinutes) {
+        return (& $r $true "idle-close（記録が $($kick.idleCloseMinutes) 分のあいだ書かれなかった。状態 $state）")
+    }
+    if ([double]$kick.settledCloseMinutes -le 0 -or ($Source -eq 'resume' -and -not $kick.settledCloseResumed)) { return (& $r $false "$state（判断待ち・完了で終わらせない設定）") }
+    if ($state -ne 'waiting-input') { return (& $r $false $state) }
+    if ($quiet -lt [double]$kick.settledCloseMinutes) { return (& $r $false ('waiting-input（{0:0.0} 分）' -f $quiet)) }
+    $refs = @(Get-SessionTaskRefs $TranscriptPaths)
+    if ($Source -eq 'resume' -and $refs.Count -eq 0) { return (& $r $false 'waiting-input（auto-loop のタスクに触れていない）') }
+    $h = Get-HeldTasks -Config $Config -TaskIds $refs -SessionIds $SessionIds
+    if ($null -eq $h) { return (& $r $false 'waiting-input（タスクの状態を読めない）') }
+    if (@($h.Held).Count -gt 0) { return (& $r $false "waiting-input（担当中: $((@($h.Held) | ForEach-Object { "$($_.id)=$($_.status)" }) -join ' ')）") }
+    $what = if ($refs.Count) { $h.Summary } else { '担当したタスクは無い' }
+    return (& $r $true ("settled-close（入力待ち {0:0} 分、{1}）" -f $quiet, $what))
+}
+
+# HostPid（claude を起動したシェル）の子プロセスのうち、claude（とその子）を終わらせる。
+# シェル・conhost（見張り自身や、裏で動かしているもの）は残す。シェルは claude が終わると後始末をして閉じ、ウィンドウも閉じる
+function Stop-SessionHost {
+    param([int]$HostPid)
+    $done = @()
+    foreach ($k in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$HostPid" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @('conhost.exe', 'pwsh.exe', 'powershell.exe') -and $_.ProcessId -ne $PID })) {
+        & taskkill.exe /PID $k.ProcessId /T /F 2>&1 | Out-Null
+        $done += "$($k.Name)/$($k.ProcessId)"
+    }
+    return $done
+}
+
+# 見張りの印（state/close-watch/<ID>.json）。見張りが動いていれば true
+function Test-CloseWatchRunning {
+    param([string]$SessionId)
+    $f = Join-Path (Get-LoopHome) "state/close-watch/$SessionId.json"
+    if (-not (Test-Path -LiteralPath $f)) { return $false }
+    try { $m = Read-LoopText $f | ConvertFrom-Json } catch { return $false }
+    return (Test-HostProcess ([int]$m.pid) $m.startedAt)
+}
+
+# 見張り（close-watch.ps1）を、ウィンドウを出さずに別のプロセスで起動する
+function Start-CloseWatch {
+    param([Parameter(Mandatory)][string]$SessionId, [Parameter(Mandatory)][int]$HostPid, [ValidateSet('kick', 'resume')][string]$Source = 'kick',
+        [string]$ParentSessionId = '', [string]$HostStartedAt = '', [int]$IntervalSeconds = 60)
+    $script = Join-Path (Split-Path -Parent $PSScriptRoot) 'close-watch.ps1'
+    $shell = (Get-Process -Id $PID).Path
+    $a = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -SessionId $SessionId -HostPid $HostPid -Source $Source -IntervalSeconds $IntervalSeconds"
+    if ($ParentSessionId) { $a += " -ParentSessionId `"$ParentSessionId`"" }
+    if ($HostStartedAt) { $a += " -HostStartedAt `"$(ConvertTo-IsoTime $HostStartedAt)`"" }
+    $conhost = if ($IsWindows) { Join-Path $env:SystemRoot 'System32\conhost.exe' } else { '' }
+    if ($conhost -and (Test-Path -LiteralPath $conhost)) { return (Start-Process -FilePath $conhost -ArgumentList "--headless `"$shell`" $a" -WindowStyle Hidden -PassThru) }
+    return (Start-Process -FilePath $shell -ArgumentList $a -PassThru)
+}
+
+# auto-resume-global が再開して、いま動いているセッション（state/running/<ID>.json の印。pid は再開のシェル）
+function Get-ResumedSessions {
+    param([string]$AutoResumeHome)
+    $dir = Join-Path $AutoResumeHome 'state/running'
+    $list = @()
+    if (-not (Test-Path -LiteralPath $dir)) { return $list }
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try { $m = [IO.File]::ReadAllText($f.FullName, $script:Utf8NoBom) | ConvertFrom-Json } catch { continue }
+        $sid = if ($m.PSObject.Properties['sessionId']) { [string]$m.sessionId } else { '' }
+        $procId = if ($m.PSObject.Properties['pid']) { [int]$m.pid } else { 0 }
+        $at = if ($m.PSObject.Properties['startedAt']) { ConvertTo-IsoTime $m.startedAt } else { '' }
+        if (-not $sid -or -not (Test-HostProcess $procId $at)) { continue }
+        $list += [pscustomobject]@{
+            SessionId = $sid; Pid = $procId; StartedAt = $at
+            ParentSessionId = $(if ($m.PSObject.Properties['parentSessionId']) { [string]$m.parentSessionId } else { '' })
+        }
+    }
+    return $list
 }
 
 # 指令リポジトリごとの、PC の中の排他（名前付きミューテックス）。同じスレッドなら入れ子にできる。
