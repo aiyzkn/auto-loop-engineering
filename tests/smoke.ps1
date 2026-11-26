@@ -334,8 +334,17 @@ try {
     $ex2 = (Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json
     [IO.File]::WriteAllText($rosterFile, "# 名簿`n`n" + ($rosterRows -f '`<アカウントの呼び名>`'), $utf8)
     $ex3 = (Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json
+    $rosterBlank = "| ID | PC | 道具 | AI のアカウント | 得意・制約 | 備考 |`n|---|---|---|---|---|---|`n| ``pc-a-claude`` | A | Claude Code | ``<アカウントの呼び名>`` | | |`n| ``pc-z-claude`` | Z | Claude Code | | | |`n| ``pc-z-copilot`` | Z | Copilot | | | |`n"
+    [IO.File]::WriteAllText($rosterFile, "# 名簿`n`n" + $rosterBlank, $utf8)
+    $ex4 = (Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json
+    [IO.File]::WriteAllText($soloFile, ($soloOrig -replace '(?m)^status:.*$', 'status: doing' -replace '(?m)^claimed_by:.*$', 'claimed_by: pc-z-copilot'), $utf8)
+    $ex5 = (Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json
+    [IO.File]::WriteAllText($soloFile, ($soloOrig -replace '(?m)^status:.*$', 'status: doing' -replace '(?m)^claimed_by:.*$', 'claimed_by: pc-y-claude'), $utf8)
+    $ex6 = (Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json
     Check '同じアカウントのエージェントの単独の doing は exclusive に出る' (@($ex1.exclusive).Count -eq 1 -and @($ex1.exclusive)[0].id -eq $soloId -and $ex1t.Text -match '緊急・単独の着手中（同じアカウント）') ($ex1 | ConvertTo-Json -Depth 4)
-    Check 'アカウントが違う・例のままなら exclusive に出ない' (@($ex2.exclusive).Count -eq 0 -and @($ex3.exclusive).Count -eq 0) "$(@($ex2.exclusive).Count) / $(@($ex3.exclusive).Count)"
+    Check 'アカウントが違えば exclusive に出ない（書いた呼び名と、空の既定の Claude も別）' (@($ex2.exclusive).Count -eq 0 -and @($ex3.exclusive).Count -eq 0) "$(@($ex2.exclusive).Count) / $(@($ex3.exclusive).Count)"
+    Check 'アカウントの列が空・例のままなら、Claude のエージェントは全部同じアカウント（名簿に無い ID も）' (@($ex4.exclusive).Count -eq 1 -and @($ex6.exclusive).Count -eq 1) "$(@($ex4.exclusive).Count) / $(@($ex6.exclusive).Count)"
+    Check 'Claude でないエージェントの単独の doing は、列が空なら exclusive に出ない' (@($ex5.exclusive).Count -eq 0) "$(@($ex5.exclusive).Count)"
     [IO.File]::WriteAllText($rosterFile, $rosterOrig, $utf8)
     [IO.File]::WriteAllText($soloFile, ($soloOrig -replace '(?m)^status:.*$', 'status: dropped'), $utf8)
     [IO.File]::WriteAllText((Join-Path $a "projects/demo/tasks/$hiId.md"), ([IO.File]::ReadAllText((Join-Path $a "projects/demo/tasks/$hiId.md"), $utf8) -replace '(?m)^status:.*$', 'status: dropped'), $utf8)
