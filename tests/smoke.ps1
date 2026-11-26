@@ -316,6 +316,29 @@ try {
     Check 'ひな形に order の行がある' ([IO.File]::ReadAllText((Join-Path $a "projects/demo/tasks/$($oIds[0]).md"), $utf8) -match '(?m)^order:\s*$')
     $st5 = Run 'a' 'status.ps1' @('-NoPull')
     Check '一覧に緊急の件数が出る' ($st5.Text -match '緊急（priority: urgent）: 1 件') $st5.Text
+    # 単独（solo）: 緊急の次・高の前。同じアカウントのエージェントが doing の間は exclusive に出る（AGENTS.md 7.3）
+    $sl = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '単独の件', '-Slug', 'solo', '-Priority', 'solo')
+    $hi = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '高い件', '-Slug', 'hi', '-Priority', 'high')
+    $soloId = (($sl.Text -split "`n")[0] -replace '^OK ', '').Trim(); $hiId = (($hi.Text -split "`n")[0] -replace '^OK ', '').Trim()
+    $st6 = Run 'a' 'status.ps1' @('-Json', '-NoPull')
+    $readyIds6 = @(($st6.Text | ConvertFrom-Json).tasks | Where-Object { $_.status -eq 'ready' } | ForEach-Object { $_.id })
+    Check 'solo で起票でき、緊急の次・高の前に並ぶ' ($sl.Code -eq 0 -and ($readyIds6[0..2] -join ',') -eq "$hotId,$soloId,$hiId") ($readyIds6 -join ',')
+    $soloFile = Join-Path $a "projects/demo/tasks/$soloId.md"; $soloOrig = [IO.File]::ReadAllText($soloFile, $utf8)
+    $rosterFile = Join-Path $a 'roster.md'; $rosterOrig = [IO.File]::ReadAllText($rosterFile, $utf8)
+    [IO.File]::WriteAllText($soloFile, ($soloOrig -replace '(?m)^status:.*$', 'status: doing' -replace '(?m)^claimed_by:.*$', 'claimed_by: pc-z-claude'), $utf8)
+    $rosterRows = "| ID | PC | 道具 | AI のアカウント | 得意・制約 | 備考 |`n|---|---|---|---|---|---|`n| ``pc-a-claude`` | A | Claude Code | ``acct1`` | | |`n| ``pc-z-claude`` | Z | Claude Code | {0} | | |`n"
+    [IO.File]::WriteAllText($rosterFile, "# 名簿`n`n" + ($rosterRows -f '`acct1`'), $utf8)
+    $ex1 = (Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json
+    $ex1t = Run 'a' 'status.ps1' @('-NoPull')
+    [IO.File]::WriteAllText($rosterFile, "# 名簿`n`n" + ($rosterRows -f '`acct2`'), $utf8)
+    $ex2 = (Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json
+    [IO.File]::WriteAllText($rosterFile, "# 名簿`n`n" + ($rosterRows -f '`<アカウントの呼び名>`'), $utf8)
+    $ex3 = (Run 'a' 'status.ps1' @('-Json', '-NoPull')).Text | ConvertFrom-Json
+    Check '同じアカウントのエージェントの単独の doing は exclusive に出る' (@($ex1.exclusive).Count -eq 1 -and @($ex1.exclusive)[0].id -eq $soloId -and $ex1t.Text -match '緊急・単独の着手中（同じアカウント）') ($ex1 | ConvertTo-Json -Depth 4)
+    Check 'アカウントが違う・例のままなら exclusive に出ない' (@($ex2.exclusive).Count -eq 0 -and @($ex3.exclusive).Count -eq 0) "$(@($ex2.exclusive).Count) / $(@($ex3.exclusive).Count)"
+    [IO.File]::WriteAllText($rosterFile, $rosterOrig, $utf8)
+    [IO.File]::WriteAllText($soloFile, ($soloOrig -replace '(?m)^status:.*$', 'status: dropped'), $utf8)
+    [IO.File]::WriteAllText((Join-Path $a "projects/demo/tasks/$hiId.md"), ([IO.File]::ReadAllText((Join-Path $a "projects/demo/tasks/$hiId.md"), $utf8) -replace '(?m)^status:.*$', 'status: dropped'), $utf8)
 
     Write-Output '10. 自動起動の判断（起こさない）'
     $arFake = Join-Path $root 'auto-resume-global'; $projFake = Join-Path $root 'claude-projects'
@@ -328,6 +351,19 @@ try {
     [IO.File]::WriteAllText((Join-Path $arFake 'config.json'), (@{ resumePrompt = "続けてください。 $oldAdd"; rebootResumePrompt = '続けてください。' } | ConvertTo-Json), $utf8)
     $k1 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
     Check '担当中・ready があれば work を起こす判断' ($k1.Text -match 'KICK work' -and $k1.Text -match 'doing=1' -and $k1.Text -match '緊急=1') $k1.Text
+    # 同じアカウントのほかのエージェントが単独を doing の間は起こさない（緊急の ready があれば起こす）。自分の単独なら起こす
+    $hotFile = Join-Path $a "projects/demo/tasks/$hotId.md"; $hotOrig = [IO.File]::ReadAllText($hotFile, $utf8)
+    [IO.File]::WriteAllText($rosterFile, "# 名簿`n`n" + ($rosterRows -f '`acct1`'), $utf8)
+    [IO.File]::WriteAllText($soloFile, ($soloOrig -replace '(?m)^status:.*$', 'status: doing' -replace '(?m)^claimed_by:.*$', 'claimed_by: pc-z-claude'), $utf8)
+    $kx1 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    [IO.File]::WriteAllText($hotFile, ($hotOrig -replace '(?m)^status:.*$', 'status: dropped'), $utf8)
+    $kx2 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    [IO.File]::WriteAllText($soloFile, ($soloOrig -replace '(?m)^status:.*$', 'status: doing' -replace '(?m)^claimed_by:.*$', 'claimed_by: pc-a-claude'), $utf8)
+    $kx3 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '同じアカウントのほかの単独の着手中: 緊急が無ければ見送り、あれば起こす' ($kx1.Text -match 'KICK work' -and $kx2.Text -match 'SKIP 同じアカウントのほかのエージェントが緊急・単独' ) "$($kx1.Text)`n$($kx2.Text)"
+    Check '自分の単独の着手中は起こす（next が再開する）' ($kx3.Text -match 'KICK work' -and $kx3.Text -match "緊急・単独の着手中=$soloId") $kx3.Text
+    [IO.File]::WriteAllText($hotFile, $hotOrig, $utf8); [IO.File]::WriteAllText($rosterFile, $rosterOrig, $utf8)
+    [IO.File]::WriteAllText($soloFile, ($soloOrig -replace '(?m)^status:.*$', 'status: dropped'), $utf8)
     $k2 = Run 'a' 'kick.ps1' @('-SkipSystemChecks')
     Check '有効にしていなければ起こさない' ($k2.Text -match 'SKIP kick.enabled が false' -and -not (Test-Path (Join-Path $root 'home-a/state/kick.json'))) $k2.Text
     New-Item -ItemType Directory -Force (Join-Path $projFake 'p1') | Out-Null
