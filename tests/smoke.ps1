@@ -397,6 +397,14 @@ try {
     (Get-Item $sFile).LastWriteTime = (Get-Date).AddMinutes(-40)
     Import-Module (Join-Path $scripts 'lib/AutoLoop.psm1') -Force
     Check '長く書かれていない作業中の形は stale（数えない）' ((Get-SessionActivity -Path $sFile -BusyMinutes 15).State -eq 'stale')
+    $aLong = Get-SessionActivity -Path $sFile -BusyMinutes 15 -LongToolMinutes 240
+    Check 'ツールの実行中（結果がまだ無い）は、longToolMinutes までは動いているとみなす' ($aLong.State -eq 'working' -and $aLong.PendingTool) ($aLong | Out-String)
+    (Get-Item $sFile).LastWriteTime = (Get-Date).AddMinutes(-300)
+    Check 'ツールの実行中でも、longToolMinutes を超えれば stale' ((Get-SessionActivity -Path $sFile -BusyMinutes 15 -LongToolMinutes 240).State -eq 'stale')
+    [IO.File]::WriteAllText($sFile, "$recUser`n", $utf8)
+    (Get-Item $sFile).LastWriteTime = (Get-Date).AddMinutes(-40)
+    $aUser = Get-SessionActivity -Path $sFile -BusyMinutes 15 -LongToolMinutes 240
+    Check 'ツールの実行中でなければ、longToolMinutes は効かない（stale）' ($aUser.State -eq 'stale' -and -not $aUser.PendingTool) ($aUser | Out-String)
     Remove-Item $sFile -Force
     [IO.File]::WriteAllText((Join-Path $arFake 'disabled'), '', $utf8)
     $k4 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
@@ -419,6 +427,34 @@ try {
     & $writeReq $mineId
     $kn2 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
     Check '即時実行: 指定のタスクを渡す' ($kn2.Text -match 'KICK work' -and $kn2.Text -match "指定=$([regex]::Escape([string]$mineId))") $kn2.Text
+    # ほかのエージェントが担当するタスクを指定されたら、見送らずにそのエージェントに回す（エスカレーション）
+    $nE = Run 'a' 'new-task.ps1' @('-Project', 'demo', '-Title', '試験: エスカレーション', '-Slug', 'escalate', '-Stage', 'implement')
+    $idE = (($nE.Text -split "`n")[0] -replace '^OK ', '').Trim()
+    $relE = "projects/demo/tasks/$idE.md"
+    # 担当はほかのエージェント（pc-b-claude）。b の clone は 7 の競合の試験のあとなので、a の手元で担当を書いてコミットする
+    $pE = Join-Path $a $relE
+    [IO.File]::WriteAllText($pE, ([IO.File]::ReadAllText($pE, $utf8) -replace '(?m)^status: .*$', 'status: doing' -replace '(?m)^claimed_by:.*$', 'claimed_by: pc-b-claude'), $utf8)
+    Gx $a @('add', '--', $relE) | Out-Null
+    $gcE = Gx $a @('commit', '-q', '-m', 'claim by b', '--', $relE)
+    $okE = ([IO.File]::ReadAllText($pE, $utf8) -match '(?m)^claimed_by: pc-b-claude$') -and $gcE.Code -eq 0
+    $otherT = if ($okE) { [pscustomobject]@{ id = $idE; claimedBy = 'pc-b-claude' } } else { $null }
+    if ($otherT) {
+        & $writeReq $otherT.id
+        $knE = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
+        Check '即時実行: ほかのエージェントが担当するタスクは、そのエージェントに回す（DryRun）' ($knE.Text -match "ESCALATE $([regex]::Escape([string]$otherT.claimedBy))（DryRun") $knE.Text
+        $toRelE = "state/kick/$($otherT.claimedBy).json"
+        Gx $a @('add', '--', $reqRel) | Out-Null; Gx $a @('commit', '-q', '-m', 'kick request', '--', $reqRel) | Out-Null
+        $knE2 = Run 'a' 'kick.ps1' @('-SkipSystemChecks', '-Trigger', 'now')
+        $toJ = if (Test-Path (Join-Path $a $toRelE)) { [IO.File]::ReadAllText((Join-Path $a $toRelE), $utf8) | ConvertFrom-Json } else { $null }
+        Check '即時実行: 回し先の印を書き、自分の印を消して 1 コミット（無効の PC でも回す）' ($knE2.Text -match "ESCALATE $([regex]::Escape([string]$otherT.claimedBy)):" -and -not (Test-Path $reqPath) -and $toJ -and $toJ.task -eq $otherT.id -and $toJ.escalatedFrom -eq 'pc-a-claude' -and $toJ.by -eq 'dashboard:test' -and (Gx $a @('log', '-1', '--format=%s')).Text -match 'エスカレーション' -and -not (Gx $a @('ls-files', '--', $reqRel)).Text.Trim()) "$($knE2.Text) / $((Gx $a @('log', '-1', '--stat')).Text)"
+        # 回された依頼（escalatedFrom あり）は、回し直さない
+        [IO.File]::WriteAllText($reqPath, (@{ requestedAt = (Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz'); by = 'dashboard:test'; task = $otherT.id; escalatedFrom = 'x-y' } | ConvertTo-Json), $utf8)
+        $knE3 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
+        Check '即時実行: 回された依頼は回し直さず、見送る' ($knE3.Text -cnotmatch '(?m)^ESCALATE' -and $knE3.Text -match 'SKIP 即時実行の指定のタスク') $knE3.Text
+        Gx $a @('rm', '-q', '--', $toRelE) | Out-Null; Gx $a @('commit', '-q', '-m', 'cleanup', '--', $toRelE) | Out-Null
+        Gx $a @('rm', '-q', '--', $relE) | Out-Null; Gx $a @('commit', '-q', '-m', 'cleanup escalate task', '--', $relE) | Out-Null
+    }
+    else { Check '即時実行のエスカレーション: 試験の前提（ほかのエージェントが担当するタスク）がある' $false "担当を書けなかった: $($nE.Text) / commit $($gcE.Text)" }
     & $writeReq '20991231-none'
     $kn3 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Trigger', 'now')
     Check '即時実行: 着手・再開できないタスクの指定は見送る' ($kn3.Text -match 'SKIP 即時実行の指定のタスク 20991231-none は') $kn3.Text
@@ -623,7 +659,7 @@ try {
             Check '終わらせればシェルも終わる（再開のセッション）' $h2.HasExited
             # 記録が書かれない（自動起動のセッションだけ。見張りの開始から数える）
             $iFile = Join-Path $projFake 'p3/cw-i.jsonl'
-            [IO.File]::WriteAllText($iFile, "$recUser`n$recTool`n", $utf8)
+            [IO.File]::WriteAllText($iFile, "$recUser`n", $utf8)
             (Get-Item $iFile).LastWriteTime = (Get-Date).AddMinutes(-90)
             $env:AUTO_LOOP_HOME = Join-Path $root 'home-a'
             $cfgW = Get-LoopConfig
@@ -631,6 +667,28 @@ try {
             $dr = Get-CloseDecision -Config $cfgW -Source resume -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-90)
             $dn = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-5)
             Check '記録が idleCloseMinutes 分書かれなければ、自動起動のセッションだけ終わらせる' ($dk.Close -and $dk.Reason -match '^idle-close' -and -not $dr.Close -and -not $dn.Close) "$($dk.Reason) / $($dr.Reason) / $($dn.Reason)"
+            # ツールの実行中（試験などの長い実行）は、longToolMinutes（既定 240 分）までは終わらせない
+            [IO.File]::WriteAllText($iFile, "$recUser`n$recTool`n", $utf8)
+            (Get-Item $iFile).LastWriteTime = (Get-Date).AddMinutes(-90)
+            $dt1 = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-90)
+            (Get-Item $iFile).LastWriteTime = (Get-Date).AddMinutes(-300)
+            $dt2 = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-300)
+            Check 'ツールの実行中は longToolMinutes まで終わらせない（超えれば終わらせる）' (-not $dt1.Close -and $dt1.Reason -match '^tool-running' -and $dt2.Close -and $dt2.Reason -match '^idle-close') "$($dt1.Reason) / $($dt2.Reason)"
+            # long-run のスキルを使った・利用者が「終了しないで」と書いたセッションは、終わらせない
+            $recSkill = '{"parentUuid":"s","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t9","name":"Skill","input":{"skill":"my-plugin:long-run"}}]}}'
+            [IO.File]::WriteAllText($iFile, "$recUser`n$recSkill`n$recDone`n", $utf8)
+            (Get-Item $iFile).LastWriteTime = (Get-Date).AddMinutes(-90)
+            $dks = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-90)
+            $recKeep = '{"parentUuid":"k","type":"user","message":{"role":"user","content":[{"type":"text","text":"今日は Keep Open で、終了しないでください"}]}}'
+            [IO.File]::WriteAllText($iFile, "$recKeep`n$recDone`n", $utf8)
+            (Get-Item $iFile).LastWriteTime = (Get-Date).AddMinutes(-90)
+            $dkp = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-90)
+            # ツールの結果・通知に同じ言い回しがあっても、利用者の入力ではないので数えない
+            $recRes = '{"parentUuid":"r","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"終了しないで"}]}}'
+            [IO.File]::WriteAllText($iFile, "$recUser`n$recTool`n$recRes`n$recNote`n$recDone`n", $utf8)
+            (Get-Item $iFile).LastWriteTime = (Get-Date).AddMinutes(-90)
+            $dkn = Get-CloseDecision -Config $cfgW -Source kick -SessionIds @('cw-i') -TranscriptPaths @($iFile) -WatchStartedAt (Get-Date).AddMinutes(-90)
+            Check 'long-run のスキル・利用者の「終了しないで」があれば終わらせない（ツールの結果の文は数えない）' (-not $dks.Close -and $dks.Reason -match '^keep-open.*long-run' -and -not $dkp.Close -and $dkp.Reason -match '^keep-open' -and $dkn.Close) "$($dks.Reason) / $($dkp.Reason) / $($dkn.Reason)"
             # 開いているセッションは、別のセッションの起動のたびに時刻の無いメタデータの行を書き足す（ファイルの更新時刻が新しくなる）。
             # 最後の時刻つきの行で数える（2026-11-21 の本番で、60 分の見張りが一度も働かなかった原因）
             $tsOld = (Get-Date).AddMinutes(-90).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
@@ -682,7 +740,7 @@ try {
     [IO.File]::WriteAllText($inboxC, $t1, $utf8)
     $st7 = (Run 'c' 'status.ps1' @('-Json')).Text | ConvertFrom-Json
     $d0 = @($st7.idle)[0]
-    Check '定義を読む（案件・段階・間隔）' (@($st7.idle).Count -eq 1 -and $d0.project -eq 'my-app' -and $d0.stage -eq 'implement' -and $d0.intervalDays -eq 7 -and $d0.due -and $st7.inbox -eq 0) ($st7 | ConvertTo-Json -Depth 5)
+    Check '定義を読む（案件・段階・間隔）' (@($st7.idle).Count -eq 1 -and $d0.project -eq 'my-app' -and $d0.stage -eq 'implement' -and $d0.intervalDays -eq 1 -and $d0.interval -eq '毎日' -and $d0.due -and $st7.inbox -eq 0) ($st7 | ConvertTo-Json -Depth 5)
     $mark = "範囲: 1 回に PR / MR 1 本（1 つのモジュール・変更 200 行まで）`n最終実施:"
     [IO.File]::WriteAllText($inboxC, $t1.Replace($mark, "$mark $((Get-Date).ToString('yyyy-MM-dd')) 済み"), $utf8)
     $k7 = Run 'c' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
