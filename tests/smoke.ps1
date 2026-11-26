@@ -599,6 +599,7 @@ try {
     Check '見送りでも状況を書く（判断・理由・セッションの数）' ($ks1.Text -match 'SKIP ほかのセッション' -and $pc -and $pc.decision -eq 'skip' -and $pc.sessions.working -eq 1 -and $pc.agentId -eq 'pc-a-claude' -and $pc.kickEnabled) $ks1.Text
     $pcRaw = if (Test-Path $pcFile) { Get-Content $pcFile -Raw } else { '' }
     Check '状況に利用率を載せる（見送りでも）' ($pc -and $pc.usage.fiveHour.usedPercentage -eq 23.5 -and $pc.usage.sevenDay.resetsAt) $pcRaw
+    Check '状況の利用率の時刻は ISO のまま（ダッシュボードが読める形）' ($pcRaw -match '"resetsAt": "\d{4}-\d{2}-\d{2}T' -and $pcRaw -match '"capturedAt": "\d{4}-\d{2}-\d{2}T' -and $pcRaw -notmatch '"(resetsAt|capturedAt|startsAt)": "\d{1,2}/') $pcRaw
     Check '状況にパスを書かない' ($pcRaw -and $pcRaw -notmatch [regex]::Escape($root) -and $pcRaw -notmatch '[A-Za-z]:\\\\')
     Check '状況のファイルだけをコミットして push する' ((Gx $a @('log', '-1', '--format=%s')).Text.Trim() -eq '[pc-a-claude] pc-status' -and (Gx $a @('ls-remote', 'origin', 'main')).Text -match (Gx $a @('rev-parse', 'HEAD')).Text.Trim())
     $mid = (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim()
@@ -640,6 +641,8 @@ try {
     [IO.File]::WriteAllText((Join-Path $limProj 'p/b.jsonl'), (& $limRec $r5b 'five_hour' 'rejected'), $utf8)
     $lw2 = @(Update-LimitWindows -ProjectsDir $limProj -Days 7)
     Check '上限の窓: 前回の結果に、新しい記録の分を足す' ($lw2.Count -eq 3 -and @($lw2 | Where-Object { $_.kind -eq 'five_hour' }).Count -eq 2 -and (Test-Path (Join-Path $root 'home-lim/state/kick-limits.json'))) ($lw2 | ConvertTo-Json)
+    Check '上限の窓: 前回の結果から読んだ時刻も ISO のまま' (@($lw2 | Where-Object { [string]$_.startsAt -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$' -or [string]$_.resetsAt -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$' }).Count -eq 0) ($lw2 | ConvertTo-Json)
+    Check 'ConvertTo-IsoText: 日時・前の版の形の文字列を ISO に、ISO はそのまま' (((ConvertTo-IsoText ([datetimeoffset]'2026-11-26T23:00:00+09:00')) -eq '2026-11-26T23:00:00+09:00') -and ((ConvertTo-IsoText '2026-11-26T23:00:00+09:00') -eq '2026-11-26T23:00:00+09:00') -and ((ConvertTo-IsoText '11/26/2026 23:00:00') -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$') -and ((ConvertTo-IsoText ('{"t":"2026-11-26T23:00:00+09:00"}' | ConvertFrom-Json).t) -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$'))
     $env:AUTO_LOOP_HOME = $oldHome
 
     Write-Output '10d. 判断待ち・完了で終わらせる見張り（close-watch.ps1。Windows だけ）'
