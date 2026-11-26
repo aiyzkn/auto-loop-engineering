@@ -24,6 +24,8 @@
   判断のたびに、PC の状況を指令リポジトリの state/pcs/<agentId>.json に書く（kick.enabled のときだけ。中身が変わったときか
   kick.statusEveryMinutes 分ごと。このファイルだけをコミットし、ほかの変更が無いときだけ push する。ダッシュボードが読む）。
   PC の状況には、直近 7 日の上限の窓（limits: 種類 five_hour / seven_day・推定の開始・解除時刻・当たったか）も載せる（セッションの記録から。state/kick-limits.json に前回の結果を残し、差分だけ読む）。
+  利用率（usage: fiveHour / sevenDay の usedPercentage・resetsAt と capturedAt。statusline-usage.ps1 が書いた state/usage.json。install.ps1 -CaptureUsage）と、
+  次の復帰（nextWakeAt: 復帰タスクの次の実行 / limitResetAt: セッションの記録の上限の解除）も、見送りの判断より前に調べて載せる。
   即時実行（-Trigger now）: ダッシュボードの「いま実行」「このタスクを実行」が指令リポジトリに書いた印（state/kick/<agentId>.json。
   requestedAt・by・task（任意））を読んで起こす。kick-poll.ps1 が kick.pollMinutes 分ごとに見に行き、印があれば -Trigger now で呼ぶ。
   6 の間隔は見ない。task があれば、そのタスクを再開・着手するよう指示して起こす（7 の「やること」が無くても起こす）。
@@ -138,6 +140,20 @@ if ($kick.enabled -or $DryRun) {
     catch { Write-LoopLog 'kick' "上限の窓を集められなかった: $($_.Exception.Message)" }
 }
 
+# 0d. 利用率（5 時間・週）を PC の状況に載せる（statusline-usage.ps1 が書いた state/usage.json。install.ps1 -CaptureUsage で有効。無ければ載せない）
+try {
+    $usage = Read-UsageSnapshot
+    if ($usage) {
+        $script:pcStatus.usage = $usage
+        if ($DryRun) {
+            $fmtU = { param($w) if (-not $w) { return '—' }; "$(if ($null -ne $w.usedPercentage) { "$($w.usedPercentage)%" } else { '?%' })$(if ($w.resetsAt) { "（解除 $($w.resetsAt)）" })" }
+            Write-Output "INFO 利用率: 5 時間 $(& $fmtU $usage.fiveHour)・週 $(& $fmtU $usage.sevenDay)（$($usage.capturedAt) の値）"
+        }
+    }
+    elseif ($DryRun) { Write-Output 'INFO 利用率: 記録なし（install.ps1 -CaptureUsage でステータスラインから書き出す）' }
+}
+catch { Write-LoopLog 'kick' "利用率を読めなかった: $($_.Exception.Message)" }
+
 # 0c. 即時実行の印を読む（-Trigger now）
 if ($Trigger -eq 'now') {
     $req = Read-KickRequest $cfg
@@ -157,6 +173,27 @@ $arCfgFile = Join-Path $arHome 'config.json'
 if (-not (Test-Path -LiteralPath $arCfgFile)) { Skip "auto-resume-global が導入されていない（$arCfgFile が無い）" }
 if (Test-Path -LiteralPath (Join-Path $arHome 'disabled')) { Skip 'auto-resume-global が停止中（disabled がある）' }
 $arCfg = [IO.File]::ReadAllText($arCfgFile, $utf8) | ConvertFrom-Json
+
+# 2b. 上限の解除待ち（4・4b で使う）を先に調べ、PC の状況に載せる（3 の「セッションが動いている」で見送るときも、次の復帰を出すため）
+#     復帰タスク ClaudeAutoResumeGlobal-Wake の次の実行（nextWakeAt。先の時刻のときだけ）と、セッションの記録の上限の解除（limitResetAt）
+$wakeAt = $null
+if ($IsWindows -and -not $SkipSystemChecks) {
+    try {
+        $info = Get-ScheduledTaskInfo -TaskName 'ClaudeAutoResumeGlobal-Wake' -ErrorAction Stop
+        if ($info.NextRunTime -and $info.NextRunTime -gt (Get-Date)) { $wakeAt = $info.NextRunTime; $script:pcStatus.nextWakeAt = $wakeAt.ToString('yyyy-MM-ddTHH:mm:sszzz') }
+    }
+    catch { }
+}
+$limit = $null
+if (-not $Force) {
+    try {
+        $margin = if ($arCfg.PSObject.Properties['marginMinutes'] -and $null -ne $arCfg.marginMinutes) { [double]$arCfg.marginMinutes } else { 3 }
+        $limit = Find-PendingLimit -ProjectsDir $projects -MarginMinutes $margin
+    }
+    catch { Write-LoopLog 'kick' "セッションの記録の上限を調べられなかった: $($_.Exception.Message)" }
+    if ($limit) { $script:pcStatus.limitResetAt = $limit.ResetAt.ToString('yyyy-MM-ddTHH:mm:sszzz') }
+}
+if ($DryRun) { Write-Output "INFO 次の復帰: $(if ($wakeAt) { "復帰タスク $($wakeAt.ToString('MM/dd HH:mm'))" } elseif ($limit) { "記録の上限の解除 $($limit.ResetAt.ToString('MM/dd HH:mm'))" } else { 'なし（上限の解除待ちは無い）' })" }
 
 # 2a. auto-resume-global が再開したセッション（state/running/<ID>.json の印）に、判断待ち・完了で終わらせる見張りを付ける。
 #     自動起動のセッションには kick-session.ps1 が付ける。auto-loop のタスクに触れていない再開のセッションは、見張りが終わらせない
@@ -190,27 +227,14 @@ if (-not $SkipSystemChecks) {
         elseif (-not $DryRun) { Remove-Item -LiteralPath $runFile -Force -ErrorAction SilentlyContinue }   # 印だけが残っている（再起動など）
     }
 
-    # 4. 上限の解除待ち（いま起こしても、すぐ上限で止まる）
-    if ($IsWindows) {
-        try {
-            $info = Get-ScheduledTaskInfo -TaskName 'ClaudeAutoResumeGlobal-Wake' -ErrorAction Stop
-            if ($info.NextRunTime) { $script:pcStatus.nextWakeAt = $info.NextRunTime.ToString('yyyy-MM-ddTHH:mm:sszzz') }
-            if ($info.NextRunTime -and $info.NextRunTime -gt (Get-Date)) { Skip "上限の解除待ち（復帰タスクが $($info.NextRunTime.ToString('MM/dd HH:mm')) に登録されている）" -Retry }
-        }
-        catch { }
-    }
+    # 4. 上限の解除待ち（いま起こしても、すぐ上限で止まる。復帰タスクの時刻は 2b で読んだ）
+    if ($wakeAt) { Skip "上限の解除待ち（復帰タスクが $($wakeAt.ToString('MM/dd HH:mm')) に登録されている）" -Retry }
 }
 # 4b. 復帰タスクが無くても、セッションの記録に解除されていない上限があれば見送る（手でスリープ解除したとき・auto-resume-global の対象外のセッションなど）。
 #     ファイルだけで判断するので -SkipSystemChecks でも見る。-Force では見ない
+#     解除時刻は 2b で調べた
 if (-not $Force) {
-    $limit = $null
-    try {
-        $margin = if ($arCfg.PSObject.Properties['marginMinutes'] -and $null -ne $arCfg.marginMinutes) { [double]$arCfg.marginMinutes } else { 3 }
-        $limit = Find-PendingLimit -ProjectsDir $projects -MarginMinutes $margin
-    }
-    catch { Write-LoopLog 'kick' "セッションの記録の上限を調べられなかった: $($_.Exception.Message)" }
     if ($limit) {
-        $script:pcStatus.limitResetAt = $limit.ResetAt.ToString('yyyy-MM-ddTHH:mm:sszzz')
         Skip "上限の解除待ち（セッションの記録: $($limit.Kind)、解除 $($limit.ResetAt.ToString('MM/dd HH:mm'))。$($limit.Project) の $($limit.SessionId.Substring(0, [math]::Min(8, $limit.SessionId.Length)))）" -Retry
     }
 }

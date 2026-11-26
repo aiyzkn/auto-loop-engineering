@@ -448,7 +448,7 @@ try {
     # 上限の前の応答は、解除の印にならない
     [IO.File]::WriteAllText($lFile, "$recUser`n$(& $recOk -30)`n$recUser`n$(& $recLim 120 'five_hour' -10)`n", $utf8)
     $kl1 = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
-    Check '復帰タスクが無くても、記録の上限の解除時刻が先なら見送る' ($kl1.Text -match 'SKIP 上限の解除待ち（セッションの記録: five_hour') $kl1.Text
+    Check '復帰タスクが無くても、記録の上限の解除時刻が先なら見送る（次の復帰に出す）' (($kl1.Text -match 'SKIP 上限の解除待ち（セッションの記録: five_hour') -and $kl1.Text -match 'INFO 次の復帰: 記録の上限の解除 ') $kl1.Text
     $kl1f = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks', '-Force')
     Check '-Force では記録の上限を見ない' ($kl1f.Text -match 'KICK work') $kl1f.Text
     [IO.File]::AppendAllText($lFile, "$recUser`n", $utf8)
@@ -504,6 +504,43 @@ try {
     Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
     Remove-Item $wFile -Force
 
+    Write-Output '10b2. 利用率（ステータスラインの JSON → state/usage.json → PC の状況）'
+    $env:AUTO_LOOP_HOME = Join-Path $root 'home-a'
+    $usageFile = Join-Path $root 'home-a/state/usage.json'
+    $reset5 = [DateTimeOffset]::new((Get-Date).AddHours(2)).ToUnixTimeSeconds(); $reset7 = [DateTimeOffset]::new((Get-Date).AddDays(3)).ToUnixTimeSeconds()
+    $slJson = '{"model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":23.46,"resets_at":' + $reset5 + '},"seven_day":{"used_percentage":41,"resets_at":' + $reset7 + '}}}'
+    $cfgU = Get-Content $cfgPath -Raw | ConvertFrom-Json
+    $innerCmd = if ($IsWindows) { 'findstr /c:display_name' } else { 'grep display_name' }
+    $cfgU | Add-Member -NotePropertyName usage -NotePropertyValue ([pscustomobject]@{ statusLineCommand = $innerCmd }) -Force
+    [IO.File]::WriteAllText($cfgPath, ($cfgU | ConvertTo-Json -Depth 5), $utf8)
+    $ErrorActionPreference = 'Continue'
+    $slOut = (@($slJson | & pwsh -NoProfile -File (Join-Path $scripts 'statusline-usage.ps1') 2>&1) -join "`n")
+    $ErrorActionPreference = 'Stop'
+    $uj = if (Test-Path $usageFile) { Get-Content $usageFile -Raw | ConvertFrom-Json } else { $null }
+    Check 'ステータスラインの JSON の利用率を書き出す（% は小数 1 桁、解除時刻は ISO）' ($uj -and $uj.fiveHour.usedPercentage -eq 23.5 -and $uj.sevenDay.usedPercentage -eq 41 -and [DateTimeOffset]::Parse($uj.fiveHour.resetsAt).ToUnixTimeSeconds() -eq $reset5 -and $uj.capturedAt) "$(if (Test-Path $usageFile) { Get-Content $usageFile -Raw })"
+    Check '表示は元のコマンドに同じ JSON を渡して任せる' ($slOut -match 'display_name') $slOut
+    $ErrorActionPreference = 'Continue'
+    '{"model":{"display_name":"Opus"}}' | & pwsh -NoProfile -File (Join-Path $scripts 'statusline-usage.ps1') 2>&1 | Out-Null
+    $ErrorActionPreference = 'Stop'
+    Check 'rate_limits が無い JSON では前の値を残す' ((Get-Content $usageFile -Raw | ConvertFrom-Json).fiveHour.usedPercentage -eq 23.5)
+    $ku = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
+    Check '自動起動の判断に利用率と次の復帰を出す' ($ku.Text -match 'INFO 利用率: 5 時間 23\.5%（解除 ' -and $ku.Text -match '週 41%' -and $ku.Text -match 'INFO 次の復帰: なし') $ku.Text
+    # install.ps1 -CaptureUsage / -NoCaptureUsage（settings.json は一時フォルダのもの）
+    $fakeSettings = Join-Path $root 'claude-settings.json'
+    [IO.File]::WriteAllText($fakeSettings, '{"model":"opus","statusLine":{"type":"command","command":"npx -y ccstatusline@latest","padding":0,"refreshInterval":10}}', $utf8)
+    $env:AUTO_LOOP_CLAUDE_SETTINGS = $fakeSettings
+    $iu1 = Run 'a' 'install.ps1' @('-NoCopy', '-CaptureUsage')
+    $s1 = Get-Content $fakeSettings -Raw | ConvertFrom-Json; $c1 = Get-Content $cfgPath -Raw | ConvertFrom-Json
+    Check 'install -CaptureUsage: ステータスラインに書き出しを挟み、元のコマンドを控える（ほかの設定は残す）' ($s1.statusLine.command -match 'statusline-usage\.ps1' -and $s1.statusLine.refreshInterval -eq 10 -and $s1.statusLine.padding -eq 0 -and $s1.model -eq 'opus' -and $c1.usage.statusLineCommand -eq 'npx -y ccstatusline@latest' -and @(Get-ChildItem (Join-Path $root 'home-a/state') -Filter 'claude-settings.*.json').Count -eq 1) $iu1.Text
+    $iu2 = Run 'a' 'install.ps1' @('-NoCopy', '-CaptureUsage')
+    Check 'install -CaptureUsage: 2 回目は何もしない（控えを上書きしない）' ($iu2.Text -match '挟んである。何もしない' -and (Get-Content $cfgPath -Raw | ConvertFrom-Json).usage.statusLineCommand -eq 'npx -y ccstatusline@latest') $iu2.Text
+    $iu3 = Run 'a' 'install.ps1' @('-NoCopy', '-NoCaptureUsage')
+    $s3 = Get-Content $fakeSettings -Raw | ConvertFrom-Json
+    Check 'install -NoCaptureUsage: 元のコマンドに戻す' ($s3.statusLine.command -eq 'npx -y ccstatusline@latest' -and $s3.statusLine.refreshInterval -eq 10 -and -not (Get-Content $cfgPath -Raw | ConvertFrom-Json).usage.statusLineCommand) $iu3.Text
+    $env:AUTO_LOOP_CLAUDE_SETTINGS = $null
+    $cfgU = Get-Content $cfgPath -Raw | ConvertFrom-Json; $cfgU.PSObject.Properties.Remove('usage')
+    [IO.File]::WriteAllText($cfgPath, ($cfgU | ConvertTo-Json -Depth 5), $utf8)
+
     Write-Output '10c. PC の状況（指令リポジトリの state/pcs/<ID>.json）'
     Run 'a' 'sync.ps1' @('-Message', '前の節の起票を送る') | Out-Null    # 作業ツリーをきれいにしておく（ほかの変更があると push しないため）
     $cfgK = Get-Content $cfgPath -Raw | ConvertFrom-Json
@@ -516,6 +553,7 @@ try {
     $pc = if (Test-Path $pcFile) { Get-Content $pcFile -Raw | ConvertFrom-Json } else { $null }
     Check '見送りでも状況を書く（判断・理由・セッションの数）' ($ks1.Text -match 'SKIP ほかのセッション' -and $pc -and $pc.decision -eq 'skip' -and $pc.sessions.working -eq 1 -and $pc.agentId -eq 'pc-a-claude' -and $pc.kickEnabled) $ks1.Text
     $pcRaw = if (Test-Path $pcFile) { Get-Content $pcFile -Raw } else { '' }
+    Check '状況に利用率を載せる（見送りでも）' ($pc -and $pc.usage.fiveHour.usedPercentage -eq 23.5 -and $pc.usage.sevenDay.resetsAt) $pcRaw
     Check '状況にパスを書かない' ($pcRaw -and $pcRaw -notmatch [regex]::Escape($root) -and $pcRaw -notmatch '[A-Za-z]:\\\\')
     Check '状況のファイルだけをコミットして push する' ((Gx $a @('log', '-1', '--format=%s')).Text.Trim() -eq '[pc-a-claude] pc-status' -and (Gx $a @('ls-remote', 'origin', 'main')).Text -match (Gx $a @('rev-parse', 'HEAD')).Text.Trim())
     $mid = (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim()
