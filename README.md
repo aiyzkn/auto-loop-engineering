@@ -88,7 +88,7 @@ pwsh -NoProfile -File $HOME\.claude\skills\auto-loop\scripts\preflight.ps1
 - 別の指令リポジトリなら、ダッシュボードをフォークし、`app.js` の `CONFIG`（`org`・`owner`・`repo`）を合わせて GitHub Pages を有効にします
 - トークンは利用者が作り、ページにだけ入れます（エージェントには渡さない）。PC ごとの作業は要りません。PC の状況をページに出すには、自動起動（`install.ps1 -EnableKick`）を有効にします
 
-着手の順（着手のたびの優先度の判定・緊急・PC 1 台 1 リポジトリ・手が空いたときの作業）は、指令リポジトリの `AGENTS.md`「7. 着手の順」と、手順 `/auto-loop next` にあります。
+着手の順（着手のたびの優先度の判定・緊急・単独・同時に動かすセッション・手が空いたときの作業）は、指令リポジトリの `AGENTS.md`「7. 着手の順」と、手順 `/auto-loop next` にあります。
 
 上限で止まっても自動で再開させたいときは、`auto-resume-global` も導入します（[skills/auto-resume-global/README.md](skills/auto-resume-global/README.md) の「導入」。パスは `skills/auto-resume-global/` に読み替える）。
 
