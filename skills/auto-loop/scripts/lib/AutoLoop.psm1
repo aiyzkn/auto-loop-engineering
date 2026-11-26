@@ -1362,4 +1362,56 @@ function Exit-ControlLock {
     $Lock.Dispose()
 }
 
+# ---- 利用率（5 時間・週）。Claude Code のステータスラインに渡る JSON の rate_limits（Pro・Max の契約で、最初の応答のあとだけ出る）から ----
+# statusline-usage.ps1 が state/usage.json に書き、kick.ps1 が PC の状況（usage）に載せる。ダッシュボードが PC の表に出す
+function Get-UsageFile { return (Join-Path (Get-LoopHome) 'state/usage.json') }
+
+function ConvertTo-UsageSnapshot {
+    param($StatusJson, [datetime]$Now = (Get-Date))
+    if (-not $StatusJson -or -not ($StatusJson.PSObject.Properties.Name -contains 'rate_limits') -or -not $StatusJson.rate_limits) { return $null }
+    $rl = $StatusJson.rate_limits
+    $snap = [ordered]@{ capturedAt = $Now.ToString('yyyy-MM-ddTHH:mm:sszzz') }
+    foreach ($pair in @(@('five_hour', 'fiveHour'), @('seven_day', 'sevenDay'))) {
+        $w = if ($rl.PSObject.Properties.Name -contains $pair[0]) { $rl.($pair[0]) } else { $null }
+        if (-not $w) { continue }
+        $o = [ordered]@{}
+        if ($w.PSObject.Properties.Name -contains 'used_percentage' -and $null -ne $w.used_percentage) {
+            try { $o.usedPercentage = [math]::Round([double]$w.used_percentage, 1) } catch { }
+        }
+        if ($w.PSObject.Properties.Name -contains 'resets_at' -and $w.resets_at) {
+            try { $o.resetsAt = [DateTimeOffset]::FromUnixTimeSeconds([long][double]$w.resets_at).ToLocalTime().ToString('yyyy-MM-ddTHH:mm:sszzz') } catch { }
+        }
+        if ($o.Count -gt 0) { $snap[$pair[1]] = $o }
+    }
+    if ($snap.Count -le 1) { return $null }
+    return $snap
+}
+
+function Save-UsageSnapshot {
+    param([Parameter(Mandatory)]$Snapshot, [string]$Path = (Get-UsageFile))
+    New-Item -ItemType Directory -Force (Split-Path -Parent $Path) | Out-Null
+    # 書きかけを読まれないよう、一時ファイルに書いてから置き換える（複数のセッションが同時に書いても壊れない）
+    $tmp = "$Path.$PID.tmp"
+    [IO.File]::WriteAllText($tmp, ((([pscustomobject]$Snapshot) | ConvertTo-Json -Depth 4) + "`n"), $script:Utf8NoBom)
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+# 前回の値を読む。値は書いた時点のもの（capturedAt）。解除時刻を過ぎた窓も残す（ダッシュボードが「解除済み」と出す）
+function Read-UsageSnapshot {
+    param([string]$Path = (Get-UsageFile))
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try { $j = [IO.File]::ReadAllText($Path, $script:Utf8NoBom) | ConvertFrom-Json } catch { return $null }
+    if (-not $j -or -not $j.capturedAt) { return $null }
+    $o = [ordered]@{ capturedAt = [string]$j.capturedAt }
+    foreach ($k in @('fiveHour', 'sevenDay')) {
+        if (-not ($j.PSObject.Properties.Name -contains $k) -or -not $j.$k) { continue }
+        $w = [ordered]@{}
+        if ($j.$k.PSObject.Properties.Name -contains 'usedPercentage' -and $null -ne $j.$k.usedPercentage) { $w.usedPercentage = [double]$j.$k.usedPercentage }
+        if ($j.$k.PSObject.Properties.Name -contains 'resetsAt' -and $j.$k.resetsAt) { $w.resetsAt = [string]$j.$k.resetsAt }
+        if ($w.Count -gt 0) { $o[$k] = $w }
+    }
+    if ($o.Count -le 1) { return $null }
+    return $o
+}
+
 Export-ModuleMember -Function *
