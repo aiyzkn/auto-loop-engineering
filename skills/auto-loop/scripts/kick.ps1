@@ -26,6 +26,8 @@
   即時実行（-Trigger now）: ダッシュボードの「いま実行」「このタスクを実行」が指令リポジトリに書いた印（state/kick/<agentId>.json。
   requestedAt・by・task（任意））を読んで起こす。kick-poll.ps1 が kick.pollMinutes 分ごとに見に行き、印があれば -Trigger now で呼ぶ。
   6 の間隔は見ない。task があれば、そのタスクを再開・着手するよう指示して起こす（7 の「やること」が無くても起こす）。
+  指定のタスクをほかのエージェントが担当している（担当が無く、assignee がほかのエージェントの ID）ときは、見送らずに、そのエージェントの印に回す
+  （エスカレーション。Move-KickRequest。回された依頼は回し直さない。回し先にすでに印があれば上書きしない）。
   起こした・やることが無い・印が古い（24 時間超）など、続けても起こせないときは印を消して push する（結果は PC の状況の lastRequest）。
   ほかのセッションが動いている・上限の解除待ちのときは印を残し、次の見回りでやり直す
   終了コード: 0 = 起こした・見送った / 1 = 設定が読めない
@@ -145,6 +147,26 @@ if ($Trigger -eq 'now') {
     if ($req.task -and $req.task -notmatch '^\d{8}-[A-Za-z0-9][A-Za-z0-9-]*$') { Skip "即時実行の印のタスク ID の形が違う（$($req.task)）" }
     $reqAge = Get-HoursSince ([string]$req.requestedAt)
     if ($null -eq $reqAge -or $reqAge -gt 24) { Skip "即時実行の印が古い・時刻が読めない（$($req.requestedAt)）" }
+    # 0d. 指定のタスクを、ほかのエージェントが担当している（または assignee がほかのエージェントの ID）なら、そのエージェントに回す
+    #     （エスカレーション。見送らない）。この PC が忙しい・無効のときも回す。回された依頼（escalatedFrom あり）は、もう回さない
+    if ($req.task) {
+        $null = Update-ControlRepo $cfg
+        $rt0 = @(Get-LoopTasks $cfg | Where-Object { $_.id -eq [string]$req.task -and $_.status -notin @('done', 'dropped', 'draft') }) | Select-Object -First 1
+        $to = if ($rt0) { Get-KickEscalationTarget -Me $me -Task $rt0 } else { '' }
+        $already = $false
+        try { $already = [bool]([IO.File]::ReadAllText($req.path, $utf8) | ConvertFrom-Json).escalatedFrom } catch { }
+        if ($to -and -not $already) {
+            $what = "即時実行の指定のタスク $($req.task) は $to の担当なので、依頼を $to に回す（エスカレーション）"
+            if ($DryRun) { Write-Output "ESCALATE $to（DryRun。回さない）: $what"; exit 0 }
+            $mr = Move-KickRequest -Config $cfg -Request $req -To $to
+            Write-LoopLog 'kick' "$what。結果: $mr"
+            Write-Output "ESCALATE ${to}: $mr"
+            $script:pcStatus.lastRequest = [ordered]@{ requestedAt = [string]$req.requestedAt; by = [string]$req.by; task = [string]$req.task; handledAt = (Get-NowIso); result = "エスカレーション: $to に回した（$mr）"; kept = $false }
+            $script:request = $null
+            Save-PcStatus 'skip' $what
+            exit 0
+        }
+    }
 }
 
 # 1. 有効か
@@ -182,7 +204,7 @@ if (-not $SkipSystemChecks) {
             $runState = 'working'
             $runLog = @()
             if ($run.sessionId -and (Test-Path -LiteralPath $projects)) { $runLog = @(Get-ChildItem -LiteralPath $projects -Recurse -File -Filter "$($run.sessionId).jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1) }
-            if ($runLog.Count -gt 0) { $runState = (Get-SessionActivity -Path $runLog[0].FullName -BusyMinutes ([double]$kick.busyMinutes)).State }
+            if ($runLog.Count -gt 0) { $runState = (Get-SessionActivity -Path $runLog[0].FullName -BusyMinutes ([double]$kick.busyMinutes) -LongToolMinutes ([double]$kick.longToolMinutes)).State }
             if ($runState -eq 'working') { Skip "前に起こしたセッションが動いている（pid $($run.pid)、$($run.startedAt) から）" -Retry }
             Write-LoopLog 'kick' "前に起こしたセッションは手が止まっている（$runState、pid $($run.pid)）。数えない"
         }
@@ -221,7 +243,7 @@ if ($kick.busyMinutes -gt 0) {
     $anyClaude = $true
     if (-not $SkipSystemChecks) { $anyClaude = [bool](Get-Process -Name 'claude' -ErrorAction SilentlyContinue | Select-Object -First 1) }
     if ($anyClaude) {
-        $busy = Get-BusySessions -ProjectsDir $projects -BusyMinutes ([double]$kick.busyMinutes)
+        $busy = Get-BusySessions -ProjectsDir $projects -BusyMinutes ([double]$kick.busyMinutes) -LongToolMinutes ([double]$kick.longToolMinutes)
         $counts = [ordered]@{ working = $busy.Working.Count; 'waiting-input' = 0; limit = 0; empty = 0; stale = 0 }
         foreach ($g in @($busy.Idle | Group-Object State)) { $counts[$g.Name] = $g.Count }
         $script:pcStatus.sessions = $counts
