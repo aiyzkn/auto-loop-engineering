@@ -237,8 +237,16 @@ try {
     [IO.File]::WriteAllText($fileA, ([IO.File]::ReadAllText($fileA, $utf8) -replace '- 次の一手:', '- 次の一手: B を実装する'), $utf8)
     $h = Run 'a' 'claim.ps1' @('heartbeat', $id, '-Status', 'waiting', '-Note', 'E-2 の判断待ち')
     Check '印と本文の変更が送られる' ($h.Code -eq 0 -and (Gx $b @('pull', '-q', '--rebase')).Code -eq 0 -and ([IO.File]::ReadAllText((Join-Path $b $taskRel), $utf8) -match '(?s)status: waiting.*次の一手: B を実装する.*checkpoint（waiting）: E-2 の判断待ち')) $h.Text
+    # 待ちの種類（wait。20261128-status-labels）
+    $hw = Run 'a' 'claim.ps1' @('heartbeat', $id, '-Status', 'waiting', '-Wait', 'command', '-Note', 'コマンドの実行を依頼')
+    $hwText = [IO.File]::ReadAllText($fileA, $utf8)
+    Check 'waiting の種類（wait）を先頭に書き、ログに残す' ($hw.Code -eq 0 -and $hwText -match '(?m)^wait: command$' -and $hwText -match 'checkpoint（waiting・command）: コマンドの実行を依頼') $hw.Text
+    $hwx = Run 'a' 'claim.ps1' @('heartbeat', $id, '-Status', 'doing', '-Wait', 'spec')
+    Check '-Wait は -Status waiting のときだけ（終了コード 1、書かない）' ($hwx.Code -eq 1 -and [IO.File]::ReadAllText($fileA, $utf8) -match '(?m)^wait: command$') $hwx.Text
+    Gx $b @('pull', '-q', '--rebase') | Out-Null
     $t = Run 'b' 'claim.ps1' @('takeover', $id, '-Note', '利用者の指示')
     Check 'b が引き継げる' ($t.Code -eq 0 -and $t.Text -match 'pc-b-claude が担当') $t.Text
+    Check '担当すると（doing）待ちの種類を消す' ([IO.File]::ReadAllText((Join-Path $b $taskRel), $utf8) -match '(?m)^wait:\s*$') ([IO.File]::ReadAllText((Join-Path $b $taskRel), $utf8) -split "`n" | Select-Object -First 16 | Out-String)
     $h2 = Run 'a' 'claim.ps1' @('heartbeat', $id, '-Note', '続き')
     Check 'a は主張の喪失に気づく（終了コード 2）' ($h2.Code -eq 2 -and $h2.Text -match '主張が失われている') $h2.Text
 
@@ -645,6 +653,23 @@ try {
     & $writeUsage 70 (& $isoNow 0.2)
     $kpU4 = Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks', '-DryRun')
     Check 'kick-poll -DryRun: 利用率の判断を出し、書かない' ($kpU3.Text -match 'INFO 利用率: unchanged' -and $kpU4.Text -match 'INFO 利用率: changed' -and (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim() -eq $cnt1) "$($kpU3.Text)`n$($kpU4.Text)"
+    # 見回りが、この PC で手を動かしているセッションの担当（進行中の印）を running に反映する（20261128-status-labels）
+    [IO.File]::WriteAllText($sFile, "$recUser`n$recTool`n", $utf8)      # セッション s は手を動かしている
+    $runMark = Join-Path $root 'home-a/state/active/demo--20991231-run.json'
+    New-Item -ItemType Directory -Force (Split-Path -Parent $runMark) | Out-Null
+    [IO.File]::WriteAllText($runMark, ([ordered]@{ task = '20991231-run'; project = 'demo'; agentId = 'pc-a-claude'; sessionId = 's'; pid = $PID; processStart = (Get-Process -Id $PID).StartTime.ToString('o') } | ConvertTo-Json), $utf8)
+    $kpR1 = Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks')
+    $pcR = Get-Content $pcFile -Raw | ConvertFrom-Json
+    Check 'kick-poll: 実行中のタスクを running に書いて push する（ID と案件だけ）' (@($pcR.running | Where-Object { $_.task -eq '20991231-run' -and $_.project -eq 'demo' }).Count -eq 1 -and -not (Get-Content $pcFile -Raw).Contains('"sessionId"') -and (Gx $a @('log', '-1', '--format=%s')).Text.Trim() -eq '[pc-a-claude] pc-running' -and (Gx $a @('ls-remote', 'origin', 'main')).Text -match (Gx $a @('rev-parse', 'HEAD')).Text.Trim()) "$($kpR1.Text)`n$(Get-Content $pcFile -Raw)"
+    $cntR = (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim()
+    Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks') | Out-Null
+    Check 'kick-poll: 実行中のタスクが同じなら書かない' ((Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim() -eq $cntR)
+    [IO.File]::WriteAllText($sFile, "$recUser`n$recTool`n$recDone`n", $utf8)   # 入力待ち → 手放した
+    $kpR2 = Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks', '-DryRun')
+    Check 'kick-poll -DryRun: 実行中のタスクの変化を出し、書かない' ($kpR2.Text -match 'INFO 実行中のタスク: changed' -and (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim() -eq $cntR) $kpR2.Text
+    Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks') | Out-Null
+    Check 'kick-poll: 手が止まれば running から外す' (@((Get-Content $pcFile -Raw | ConvertFrom-Json).running | Where-Object { $_.task -eq '20991231-run' }).Count -eq 0) (Get-Content $pcFile -Raw)
+    Remove-Item $runMark -Force
     Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
     $cfgK.kick.enabled = $false
     [IO.File]::WriteAllText($cfgPath, ($cfgK | ConvertTo-Json -Depth 5), $utf8)
