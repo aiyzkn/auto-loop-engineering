@@ -625,6 +625,26 @@ try {
     Check '書きかけがあれば、状況はコミットだけして push しない（書きかけは入れない）' ($ks4.Text -match 'SKIP 前に起こしてから' -and -not $tracked -and (Gx $a @('log', '-1', '--format=%s')).Text.Trim() -eq '[pc-a-claude] pc-status' -and (Gx $a @('ls-remote', 'origin', 'main')).Text -notmatch (Gx $a @('rev-parse', 'HEAD')).Text.Trim()) $ks4.Text
     Remove-Item (Join-Path $a 'half-edit.md') -Force
     Gx $a @('push', '-q', 'origin', 'HEAD:main') | Out-Null
+    # 見回り（kick-poll.ps1）が、利用率の変化（% か解除時刻）だけを状況に反映して push する（20261128-dashboard-pc-usage-percent）
+    $isoNow = { param([double]$H) [DateTimeOffset]::Now.AddHours($H).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+    $pcRaw0 = Get-Content $pcFile -Raw
+    $upd0 = if ($pcRaw0 -match '"updatedAt": "([^"]+)"') { $Matches[1] } else { '' }
+    $newReset5 = & $isoNow 3
+    $writeUsage = { param([double]$P5, [string]$At) [IO.File]::WriteAllText($usageFile, ([ordered]@{ capturedAt = $At; fiveHour = [ordered]@{ usedPercentage = $P5; resetsAt = $newReset5 }; sevenDay = [ordered]@{ usedPercentage = 41; resetsAt = $newReset5 } } | ConvertTo-Json -Depth 4), $utf8) }
+    & $writeUsage 61.5 (& $isoNow 0)
+    $cnt0 = (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim()
+    $kpU1 = Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks')
+    $pcRawU = Get-Content $pcFile -Raw
+    Check 'kick-poll: 利用率が変われば usage だけを書き換えて push する' ($pcRawU -match '"usedPercentage": 61\.5' -and (Gx $a @('log', '-1', '--format=%s')).Text.Trim() -eq '[pc-a-claude] pc-usage' -and (Gx $a @('ls-remote', 'origin', 'main')).Text -match (Gx $a @('rev-parse', 'HEAD')).Text.Trim()) "$($kpU1.Text)`n$pcRawU"
+    Check 'kick-poll: 最後の判断の時刻（updatedAt）・判断は変えず、時刻は ISO のまま' ($upd0 -and $pcRawU -match ('"updatedAt": "' + [regex]::Escape($upd0) + '"') -and $pcRawU -match '"decision": "skip"' -and $pcRawU -notmatch '"(resetsAt|capturedAt|startsAt|updatedAt|handledAt)": "\d{1,2}/' -and $pcRawU -notmatch "`r") $pcRawU
+    & $writeUsage 61.5 (& $isoNow 0.1)     # capturedAt だけが違う
+    $cnt1 = (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim()
+    Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks') | Out-Null
+    Check 'kick-poll: % と解除時刻が同じなら書かない（コミットが増えない）' ([int]$cnt1 -eq [int]$cnt0 + 1 -and (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim() -eq $cnt1) "$cnt0 → $cnt1 → $((Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim())"
+    $kpU3 = Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks', '-DryRun')
+    & $writeUsage 70 (& $isoNow 0.2)
+    $kpU4 = Run 'a' 'kick-poll.ps1' @('-SkipSystemChecks', '-DryRun')
+    Check 'kick-poll -DryRun: 利用率の判断を出し、書かない' ($kpU3.Text -match 'INFO 利用率: unchanged' -and $kpU4.Text -match 'INFO 利用率: changed' -and (Gx $a @('rev-list', '--count', 'HEAD')).Text.Trim() -eq $cnt1) "$($kpU3.Text)`n$($kpU4.Text)"
     Remove-Item (Join-Path $root 'home-a/state/kick.json') -Force
     $cfgK.kick.enabled = $false
     [IO.File]::WriteAllText($cfgPath, ($cfgK | ConvertTo-Json -Depth 5), $utf8)
