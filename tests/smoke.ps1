@@ -568,6 +568,12 @@ try {
     '{"model":{"display_name":"Opus"}}' | & pwsh -NoProfile -File (Join-Path $scripts 'statusline-usage.ps1') 2>&1 | Out-Null
     $ErrorActionPreference = 'Stop'
     Check 'rate_limits が無い JSON では前の値を残す' ((Get-Content $usageFile -Raw | ConvertFrom-Json).fiveHour.usedPercentage -eq 23.5)
+    # 5 時間の窓が切れたあと、次の窓が始まるまでは five_hour が出ない。その窓だけ前の値を残す（ダッシュボードが「解除済み」と出す）
+    $ErrorActionPreference = 'Continue'
+    ('{"rate_limits":{"seven_day":{"used_percentage":41,"resets_at":' + ($reset7 + 60) + '}}}') | & pwsh -NoProfile -File (Join-Path $scripts 'statusline-usage.ps1') 2>&1 | Out-Null
+    $ErrorActionPreference = 'Stop'
+    $ujRaw = Get-Content $usageFile -Raw; $uj2 = $ujRaw | ConvertFrom-Json
+    Check 'five_hour だけが無い JSON では、5 時間の窓は前の値を残し、週は新しい値にする' ($uj2.fiveHour.usedPercentage -eq 23.5 -and [DateTimeOffset]::Parse($uj2.fiveHour.resetsAt).ToUnixTimeSeconds() -eq $reset5 -and [DateTimeOffset]::Parse($uj2.sevenDay.resetsAt).ToUnixTimeSeconds() -eq ($reset7 + 60) -and $ujRaw -match '"fiveHour":\s*\{[^}]*"resetsAt":\s*"\d{4}-\d{2}-\d{2}T') $ujRaw
     $ku = Run 'a' 'kick.ps1' @('-DryRun', '-SkipSystemChecks')
     Check '自動起動の判断に利用率と次の復帰を出す' ($ku.Text -match 'INFO 利用率: 5 時間 23\.5%（解除 ' -and $ku.Text -match '週 41%' -and $ku.Text -match 'INFO 次の復帰: なし') $ku.Text
     # install.ps1 -CaptureUsage / -NoCaptureUsage（settings.json は一時フォルダのもの）
