@@ -694,6 +694,30 @@ try {
     Check '上限の窓: 前回の結果に、新しい記録の分を足す' ($lw2.Count -eq 3 -and @($lw2 | Where-Object { $_.kind -eq 'five_hour' }).Count -eq 2 -and (Test-Path (Join-Path $root 'home-lim/state/kick-limits.json'))) ($lw2 | ConvertTo-Json)
     Check '上限の窓: 前回の結果から読んだ時刻も ISO のまま' (@($lw2 | Where-Object { [string]$_.startsAt -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$' -or [string]$_.resetsAt -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$' }).Count -eq 0) ($lw2 | ConvertTo-Json)
     Check 'ConvertTo-IsoText: 日時・前の版の形の文字列を ISO に、ISO はそのまま' (((ConvertTo-IsoText ([datetimeoffset]'2026-11-26T23:00:00+09:00')) -eq '2026-11-26T23:00:00+09:00') -and ((ConvertTo-IsoText '2026-11-26T23:00:00+09:00') -eq '2026-11-26T23:00:00+09:00') -and ((ConvertTo-IsoText '11/26/2026 23:00:00') -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$') -and ((ConvertTo-IsoText ('{"t":"2026-11-26T23:00:00+09:00"}' | ConvertFrom-Json).t) -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$'))
+    # ステータスラインが見た窓（上限に近づかなかった窓）も limits に入る（20261128-limit-band-fix）
+    $uwFile = Join-Path $root 'home-lim/state/usage-windows.json'
+    $iso = { param([double]$H) [DateTimeOffset]::Now.AddHours($H).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+    $u5a = & $iso 3; $u7a = & $iso 100
+    $snapA = [ordered]@{ capturedAt = (& $iso 0); fiveHour = [ordered]@{ usedPercentage = 20.0; resetsAt = $u5a }; sevenDay = [ordered]@{ usedPercentage = 50.0; resetsAt = $u7a } }
+    $wrote1 = Add-UsageWindows $snapA -Path $uwFile
+    $snapA.fiveHour.usedPercentage = 35.0
+    $wrote2 = Add-UsageWindows $snapA -Path $uwFile
+    $snapA.fiveHour.usedPercentage = 30.0
+    $wrote3 = Add-UsageWindows $snapA -Path $uwFile
+    $uw = @(Read-UsageWindows -Path $uwFile)
+    Check '利用率の窓の履歴: 新しい窓と peak の上昇だけ書く、peak は最大、一時ファイルを残さない' ($wrote1 -and $wrote2 -and -not $wrote3 -and $uw.Count -eq 2 -and (@($uw | Where-Object { $_.kind -eq 'five_hour' })[0].peak -eq 35) -and -not (Get-ChildItem (Split-Path $uwFile) -Filter '*.tmp')) (Get-Content $uwFile -Raw)
+    $u5old = & $iso (-4)
+    [void](Add-UsageWindows ([ordered]@{ capturedAt = (& $iso 0); fiveHour = [ordered]@{ usedPercentage = 100.0; resetsAt = $u5old } }) -Path $uwFile)
+    $lw3 = @(Update-LimitWindows -ProjectsDir $limProj -Days 7 -UsageWindows (Read-UsageWindows -Path $uwFile))
+    $m5 = @($lw3 | Where-Object { $_.kind -eq 'five_hour' -and $_.resetsAt -eq $u5a })
+    $m5old = @($lw3 | Where-Object { $_.kind -eq 'five_hour' -and $_.resetsAt -eq $u5old })
+    $m7 = @($lw3 | Where-Object { $_.kind -eq 'seven_day' -and $_.resetsAt -eq $u7a })
+    Check '上限の窓: ステータスラインが見た窓も入る（当たっていない窓は hit なし・peak 付き、100% は hit、開始は解除 − 窓の長さ）' ($m5.Count -eq 1 -and -not $m5[0].hit -and $m5[0].peak -eq 35 -and (([datetimeoffset]::Parse($m5[0].resetsAt) - [datetimeoffset]::Parse($m5[0].startsAt)).TotalHours -eq 5) -and $m5old.Count -eq 1 -and $m5old[0].hit -and $m7.Count -eq 1 -and $m7[0].peak -eq 50 -and (([datetimeoffset]::Parse($m7[0].resetsAt) - [datetimeoffset]::Parse($m7[0].startsAt)).TotalDays -eq 7)) ($lw3 | ConvertTo-Json)
+    # 記録の窓と同じ解除時刻なら 1 件にまとめ、hit は記録の値を残し peak を足す
+    $r5iso = [DateTimeOffset]::FromUnixTimeSeconds($r5).ToLocalTime().ToString('yyyy-MM-ddTHH:mm:sszzz')
+    $lw4 = @(Update-LimitWindows -ProjectsDir $limProj -Days 7 -UsageWindows @([ordered]@{ kind = 'five_hour'; resetsAt = $r5iso; peak = 90.0 }))
+    $m5r = @($lw4 | Where-Object { $_.kind -eq 'five_hour' -and $_.resetsAt -eq $r5iso })
+    Check '上限の窓: 記録とステータスラインの同じ窓は 1 件（hit は残り、peak が付く）' ($m5r.Count -eq 1 -and $m5r[0].hit -and $m5r[0].peak -eq 90) ($lw4 | ConvertTo-Json)
     $env:AUTO_LOOP_HOME = $oldHome
 
     Write-Output '10d. 判断待ち・完了で終わらせる見張り（close-watch.ps1。Windows だけ）'
